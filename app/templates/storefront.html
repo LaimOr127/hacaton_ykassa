@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="{{ csrf }}">
+    <title>Заказ из переписки — {{ title }}</title>
+    <link rel="stylesheet" href="/static/order.css">
+    <script src="/static/order.js" defer></script>
+  </head>
+  <body data-mode="{{ mode }}" data-order="{{ order.id if order else '' }}">
+    <header class="masthead">
+      <a href="/" class="brand">{{ title }}</a>
+      {% if mode == "simulated" %}<span class="mode">Симуляция оплаты</span>{% endif %}
+    </header>
+    <main>
+      <h1>Заказ из переписки</h1>
+      <div class="workspace">
+        <section class="conversation" aria-labelledby="chat-title">
+          <h2 id="chat-title">Переписка</h2>
+          <div id="messages" class="messages" role="log" aria-label="Сообщения">
+            <p class="message agent">Здравствуйте! Напишите, сколько завтраков нужно и сколько из них вегетарианских.</p>
+            {% for text, reply in transcript %}
+              <p class="message customer">{{ text }}</p>
+              <p class="message agent">{{ reply }}</p>
+            {% endfor %}
+          </div>
+          {% if not transcript %}
+            <button type="button" id="sample" class="sample">Попробовать: 20 завтраков, из них 5 вегетарианских</button>
+          {% endif %}
+          <form id="chat">
+            <label for="text">Ваше сообщение</label>
+            <textarea id="text" name="text" rows="2" maxlength="4000" required
+              placeholder="Напишите заказ или попросите изменить состав"></textarea>
+            <button id="send" type="submit">Отправить</button>
+          </form>
+          <p id="notice" role="alert" hidden></p>
+        </section>
+        <aside class="receipt" aria-labelledby="receipt-title">
+          <h2 id="receipt-title">Ваш заказ</h2>
+          <p id="empty">Позиции появятся здесь после сообщения.</p>
+          <ul id="items" class="items"></ul>
+          <div class="total"><span>Итого</span><strong id="total">0 ₽</strong></div>
+          <p id="deposit" hidden></p>
+          <p id="payment-status" role="status"></p>
+          <div class="actions">
+            <button id="pay" type="button" hidden>Подтвердить заказ</button>
+            <a id="checkout" target="_blank" rel="noopener noreferrer" class="button" hidden>Открыть ЮKassa</a>
+            <button id="check-payment" type="button" class="secondary" hidden>Проверить платёж</button>
+            <button id="simulate" type="button" hidden>Подтвердить симуляцию</button>
+            <button id="new-order" type="button" class="secondary" hidden>Начать новый заказ</button>
+          </div>
+        </aside>
+      </div>
+    </main>
+  </body>
+</html>

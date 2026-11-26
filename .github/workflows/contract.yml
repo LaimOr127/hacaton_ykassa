@@ -20,7 +20,7 @@ jobs:
       - name: Start Swagger UI
         run: |
           docker compose config --quiet
-          docker compose up -d
+          docker compose up -d swagger
       - name: Check Swagger UI and served contract
         shell: bash
         run: |
