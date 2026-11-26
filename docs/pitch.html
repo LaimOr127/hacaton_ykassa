@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Заказ из переписки · Хакатон ЮKassa</title>
+<style>
+  @page { size: 1280px 720px; margin: 0 }
+  * { box-sizing: border-box }
+  body { margin: 0; font: 26px/1.35 "Segoe UI", Arial, sans-serif; background: #dce7e9; color: #122e39 }
+  .slide {
+    width: 1280px; height: 720px; margin: 24px auto; background: #f4faf9; color: #122e39;
+    padding: 68px 80px 50px; display: flex; flex-direction: column; gap: 24px;
+    break-inside: avoid;
+  }
+  .slide + .slide { break-before: page }
+  .cover { background: #103744; color: #fff; justify-content: center }
+  .cover p { color: #d7f1ee }
+  h1, h2, h3, p { margin: 0 }
+  h1 { font-size: 102px; line-height: .99; letter-spacing: -.06em; max-width: 850px }
+  h2 { font-size: 58px; line-height: 1.05; letter-spacing: -.035em }
+  h3 { font-size: 29px; margin-bottom: 10px }
+  .lead { max-width: 950px; font-size: 34px; line-height: 1.28 }
+  .context, .note { font-size: 22px; color: #365763 }
+  .cover .context { margin-bottom: 12px }
+  .note { margin-top: auto }
+  .quote { border-left: 6px solid #008578; padding: 9px 24px; margin: 3px 0; font-size: 34px }
+  .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 42px; margin-top: 15px }
+  .columns section { border-top: 3px solid #488481; padding-top: 18px }
+  .amount { font-size: 69px; line-height: 1.1; color: #00594e; font-weight: 700; letter-spacing: -.045em }
+  .flow { display: grid; grid-template-columns: repeat(3, 1fr); gap: 26px; margin-top: 32px }
+  .flow section { border-top: 4px solid #008578; padding-top: 16px }
+  .flow p { font-size: 24px }
+  .checks { list-style: none; display: grid; gap: 12px; margin: 17px 0 0; padding: 0 }
+  .checks li { padding: 12px 0; border-bottom: 1px solid #b6cecf }
+  a { color: #00594e }
+  @media print { body { background: #fff } .slide { margin: 0; print-color-adjust: exact; -webkit-print-color-adjust: exact } }
+</style>
+<main>
+  <article class="slide cover">
+    <p class="context">Хакатон ЮKassa · Трек «Интегратор»</p>
+    <h1>Заказ из<br>переписки</h1>
+    <p class="lead">Агент собирает заказ из сообщений, считает его по прайсу продавца и проверяет платёж через MCP ЮKassa.</p>
+  </article>
+  <article class="slide">
+    <h2>Когда покупатель меняет заказ</h2>
+    <p>Кофейня уже получила заказ на 20 завтраков, из которых пять вегетарианские.</p>
+    <p class="quote">«Замените два обычных завтрака на вегетарианские»</p>
+    <div class="columns">
+      <section><h3>До правки</h3><p class="amount">7 250 ₽</p><p>15 обычных + 5 вегетарианских</p></section>
+      <section><h3>После правки</h3><p class="amount">7 350 ₽</p><p>13 обычных + 7 вегетарианских</p></section>
+    </div>
+    <p class="note">Суммы проверены на демонстрационном прайсе.</p>
+  </article>
+  <article class="slide">
+    <h2>Подключение второго бизнеса</h2>
+    <div class="columns">
+      <section><h3>Кофейня</h3><p>Цена за штуку. Покупатель правит состав набора и оплачивает весь заказ.</p></section>
+      <section><h3>Клининг</h3><p>Тариф по площади и цена допуслуги. Предоплата 30% от 5&nbsp;300&nbsp;₽ составляет <strong>1&nbsp;590&nbsp;₽</strong>.</p></section>
+    </div>
+    <p class="lead">Владелец загружает CSV, задаёт предоплату и подключает собственный тестовый MCP-токен.</p>
+    <p class="note">Регистрация, импорт и симуляция оплаты проверены в браузере.</p>
+  </article>
+  <article class="slide">
+    <h2>Как заказ становится оплаченным</h2>
+    <div class="flow">
+      <section><h3>Сообщение</h3><p>Готовая языковая модель извлекает позиции и уточняет недостающие сведения.</p></section>
+      <section><h3>Согласие</h3><p>Сервер рассчитывает сумму по прайсу и фиксирует подтверждённую покупателем версию.</p></section>
+      <section><h3>Платёж</h3><p>Сервер вызывает <code>create_payment</code>, затем сверяет результат через <code>get_payment</code>.</p></section>
+    </div>
+    <p class="note">При потере ответа приложение блокирует повторную оплату до сверки в кабинете продавца.</p>
+  </article>
+  <article class="slide">
+    <h2>Проверка перед защитой</h2>
+    <ul class="checks">
+      <li><strong>26 тестов.</strong> Проверены расчёты, повторы, изоляция магазинов и восстановление платежей.</li>
+      <li><strong>Два бизнеса.</strong> Обе витрины прошли симуляцию, кабинет проверен в Edge.</li>
+      <li><strong>Осталось.</strong> Тестовая оплата через ЮKassa с подключённой моделью и замер времени оформления.</li>
+    </ul>
+    <p class="note"><a href="https://github.com/LaimOr127/hacaton_ykassa">Репозиторий и инструкция запуска</a></p>
+  </article>
+</main>
+</html>
