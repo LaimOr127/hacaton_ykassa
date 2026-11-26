@@ -24,6 +24,7 @@ class Payment(BaseModel):
     status: Literal["pending", "succeeded", "canceled"]
     amount: ProviderAmount
     confirmation_url: StrictStr | None = None
+    description: StrictStr | None = None
 
     @property
     def kopecks(self) -> int:
@@ -55,6 +56,10 @@ def has_error(error: Exception, types: tuple[type[Exception], ...]) -> bool:
 
 def amount_value(kopecks: int) -> str:
     return f"{kopecks // 100}.{kopecks % 100:02d}"
+
+
+def payment_reference(attempt_id: str) -> str:
+    return f"Order {attempt_id}"
 
 
 def trusted_checkout(url: str | None) -> str | None:
@@ -126,7 +131,7 @@ class YooKassa:
         return anyio.run(
             self.call,
             "create_payment",
-            {"amount": {"value": amount_value(amount), "currency": "RUB"}, "description": f"Order {attempt_id}"},
+            {"amount": {"value": amount_value(amount), "currency": "RUB"}, "description": payment_reference(attempt_id)},
         )
 
     def get(self, external_id: str) -> Payment:

@@ -234,8 +234,10 @@ def test_small_scope_catalog_can_charge_deposit(settings):
 def test_reconcile_create_and_get_disagreements(settings, created_status, created_amount, checked_currency, expected):
     class Gateway:
         reads = 0
+        reference = ""
 
         def create(self, amount, attempt_id):
+            self.reference = f"Order {attempt_id}"
             return Payment(
                 id="provider-1", status=created_status,
                 amount=ProviderAmount(value=amount_value(created_amount), currency="RUB"),
@@ -250,6 +252,7 @@ def test_reconcile_create_and_get_disagreements(settings, created_status, create
             return Payment(
                 id=external_id, status="canceled" if expected == "canceled" else "succeeded",
                 amount=ProviderAmount(value="7250.00", currency=checked_currency),
+                description=self.reference,
             )
 
     gateway = Gateway()

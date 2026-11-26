@@ -1,8 +1,9 @@
 import json
+import re
 import time
 from uuid import uuid4
 
-from .gateway import InvalidPaymentResponse, PaymentNotSent, trusted_checkout
+from .gateway import InvalidPaymentResponse, PaymentNotSent, payment_reference, trusted_checkout
 from .orders import OrderError, check_version, lookup_order, quote_for
 from .storage import Store
 
@@ -120,9 +121,14 @@ class Payments:
 
     def record(self, attempt, payment, *, verified):
         snapshot = json.loads(attempt["snapshot"])
+        reference = payment_reference(attempt["id"])
+        wrong_reference = payment.description is not None and payment.description != reference
+        unconfirmed_reference = verified and (
+            attempt["state"] == "unknown" or attempt["external_id"] is None
+        ) and payment.description != reference
         if payment.amount.currency != "RUB" or payment.kopecks != snapshot["payable_kopecks"] or (
             attempt["external_id"] and payment.id != attempt["external_id"]
-        ):
+        ) or wrong_reference or unconfirmed_reference:
             self.mark_unknown(attempt["id"], None if verified else payment.id)
             return
         try:
@@ -146,8 +152,9 @@ class Payments:
                 return
             changed = db.execute(
                 """UPDATE attempts SET state = ?, external_id = ?, confirmation_url = ?, next_check = ?
-                   WHERE id = ? AND state IN ('creating', 'pending', 'unknown')""",
-                (local_status, payment.id, checkout, int(time.time()) + (2 if verified else 0), attempt["id"]),
+                   WHERE id = ? AND state IN ('creating', 'pending', 'unknown')
+                   AND (external_id IS NULL OR external_id = ?)""",
+                (local_status, payment.id, checkout, int(time.time()) + (2 if verified else 0), attempt["id"], payment.id),
             ).rowcount
             if changed and local_status in {"succeeded", "canceled"}:
                 order_state = "agreed"
@@ -197,3 +204,42 @@ class Payments:
         gateway.approve(row["external_id"])
         self.record(row, gateway.get(row["external_id"]), verified=True)
         return self.get(session, order_id, attempt_id)
+
+    def reconcile(self, merchant, attempt_id: str, supplied_id: str):
+        with self.store.transaction() as db:
+            attempt = db.execute(
+                """SELECT a.* FROM attempts a JOIN orders o ON o.id = a.order_id
+                   WHERE a.id = ? AND o.merchant = ? AND o.attempt_id = a.id""",
+                (attempt_id, merchant),
+            ).fetchone()
+            if not attempt:
+                raise OrderError(404, "payment_not_found", "Платёжная попытка не найдена.")
+            if attempt["state"] == "creating" and attempt["created_at"] + 30 <= int(time.time()):
+                db.execute("UPDATE attempts SET state = 'unknown' WHERE id = ?", (attempt_id,))
+            elif attempt["state"] != "unknown":
+                raise OrderError(409, "review_unavailable", "Эта попытка больше не требует сверки.")
+
+        external_id = attempt["external_id"] or supplied_id.strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", external_id) or (
+            attempt["external_id"] and supplied_id.strip() not in {"", external_id}
+        ):
+            raise OrderError(400, "invalid_payment_id", "Введите идентификатор платежа из кабинета ЮKassa.")
+        gateway = self.gateway_for(merchant)
+        if gateway is None:
+            raise OrderError(503, "payment_unavailable", "Сначала восстановите подключение ЮKassa.")
+        try:
+            payment = gateway.get(external_id)
+        except Exception as error:
+            raise OrderError(503, "payment_unavailable", "ЮKassa не подтвердила платёж. Попытка остаётся на сверке.") from error
+        if (
+            payment.id != external_id
+            or payment.amount.currency != "RUB"
+            or payment.kopecks != public_attempt(attempt)["amount_kopecks"]
+            or payment.description != payment_reference(attempt_id)
+        ):
+            raise OrderError(409, "payment_mismatch", "Платёж не совпадает с номером попытки или суммой заказа.")
+        self.record(attempt, payment, verified=True)
+        with self.store.read() as db:
+            resolved = db.execute("SELECT external_id FROM attempts WHERE id = ?", (attempt_id,)).fetchone()
+        if resolved["external_id"] != external_id:
+            raise OrderError(409, "payment_mismatch", "Этот идентификатор связан с другой попыткой.")

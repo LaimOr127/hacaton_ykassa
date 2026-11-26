@@ -25,6 +25,7 @@
     </div>
     <nav class="section-nav" aria-label="Разделы кабинета">
       <a href="#orders">Заказы</a><a href="#catalog">Прайс и предоплата</a><a href="#connection">Оплата</a>
+      {% if reviews or review_page > 1 %}<a href="#reviews">Сверка платежей</a>{% endif %}
     </nav>
     {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
     {% if notice %}<p class="notice" role="status">{{ notice }}</p>{% endif %}
@@ -48,6 +49,34 @@
           <p>Заказов пока нет. {% if catalog_ready %}Проверьте витрину как покупатель.{% else %}Загрузите прайс, чтобы открыть витрину.{% endif %}</p>
         {% endif %}
       </section>
+      {% if reviews or review_page > 1 %}
+      <section class="workspace-panel catalog-panel" id="reviews" aria-labelledby="reviews-heading">
+        <h2 id="reviews-heading">Сверка платежей</h2>
+        <p>Найдите в кабинете ЮKassa запись с указанным описанием. Результат проверит сервер.</p>
+        {% for review in reviews %}
+          <article class="review-row" aria-labelledby="review-{{ review.id }}">
+            <h3 id="review-{{ review.id }}">Заказ #{{ review.order }} · {{ '%.2f'|format(review.amount / 100) }} ₽</h3>
+            <p>Описание в ЮKassa <code>{{ review.reference }}</code></p>
+            <form method="post" action="/merchant/payment-review/{{ review.id }}">
+              <input type="hidden" name="token" value="{{ csrf }}">
+              <input type="hidden" name="review_page" value="{{ review_page }}">
+              {% if not review.known %}
+                <label for="payment-{{ review.id }}">Идентификатор платежа</label>
+                <input id="payment-{{ review.id }}" name="payment_id" required maxlength="128" autocomplete="off">
+              {% endif %}
+              <button>Сверить с ЮKassa</button>
+            </form>
+          </article>
+        {% endfor %}
+        {% if not reviews %}<p class="hint">На этой странице больше нет попыток.</p>{% endif %}
+        {% if review_page > 1 or review_more %}
+          <nav class="section-nav" aria-label="Страницы сверки">
+            {% if review_page > 1 %}<a href="/merchant?review_page={{ review_page - 1 }}#reviews">Предыдущая страница</a>{% endif %}
+            {% if review_more %}<a href="/merchant?review_page={{ review_page + 1 }}#reviews">Следующая страница</a>{% endif %}
+          </nav>
+        {% endif %}
+      </section>
+      {% endif %}
       <section class="workspace-panel connection-panel" id="connection" aria-labelledby="connection-heading">
         <h2 id="connection-heading">Оплата</h2>
         {% if mode == 'simulated' %}

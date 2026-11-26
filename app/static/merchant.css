@@ -42,6 +42,10 @@
 .notice { color: var(--accent); }
 .catalog-list { padding-inline-start: 22px; }
 .catalog-list .hint { margin-inline-start: 5px; }
+.review-row { padding: 16px 0; border-top: 1px solid var(--edge); }
+.review-row h3 { margin: 0; font-size: 1.05rem; }
+.review-row code { overflow-wrap: anywhere; }
+.review-row form { max-width: 32rem; }
 
 @media (max-width: 760px) {
   .merchant-layout, .merchant .access-grid { grid-template-columns: 1fr; }

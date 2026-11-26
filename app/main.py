@@ -72,7 +72,7 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
         www_redirect=False,
     )
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
-    app.include_router(merchant_routes(merchants, TEMPLATES), include_in_schema=False)
+    app.include_router(merchant_routes(merchants, TEMPLATES, payments), include_in_schema=False)
 
     @app.middleware("http")
     async def security_headers(request, call_next):
