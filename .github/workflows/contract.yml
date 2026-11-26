@@ -1,0 +1,48 @@
+name: HTTP contract
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Lint OpenAPI and examples
+        run: npx --yes --package=@redocly/cli@2.12.0 -- redocly lint contracts/openapi.yaml
+      - name: Start Swagger UI
+        run: |
+          docker compose config --quiet
+          docker compose up -d
+      - name: Check Swagger UI and served contract
+        shell: bash
+        run: |
+          base=http://127.0.0.1:8081
+          curl -fsS --max-time 5 --retry 15 --retry-all-errors --retry-delay 1 "$base/" -o "$RUNNER_TEMP/swagger.html"
+          grep -Fq 'id="swagger-ui"' "$RUNNER_TEMP/swagger.html"
+          curl -fsS --max-time 5 "$base/swagger-ui.css" -o "$RUNNER_TEMP/swagger.css"
+          test -s "$RUNNER_TEMP/swagger.css"
+          curl -fsS --max-time 5 "$base/swagger-ui-bundle.js" -o "$RUNNER_TEMP/swagger.js"
+          test -s "$RUNNER_TEMP/swagger.js"
+          curl -fsS --max-time 5 "$base/swagger-initializer.js" -o "$RUNNER_TEMP/swagger-init.js"
+          grep -Fq 'url: "./openapi.yaml"' "$RUNNER_TEMP/swagger-init.js"
+          grep -Fq 'layout: "BaseLayout"' "$RUNNER_TEMP/swagger-init.js"
+          grep -Fq 'supportedSubmitMethods: []' "$RUNNER_TEMP/swagger-init.js"
+          grep -Fq 'tryItOutEnabled: false' "$RUNNER_TEMP/swagger-init.js"
+          grep -Fq 'validatorUrl: "none"' "$RUNNER_TEMP/swagger-init.js"
+          grep -Fq 'queryConfigEnabled: false' "$RUNNER_TEMP/swagger-init.js"
+          curl -fsS --max-time 5 "$base/openapi.yaml" -o "$RUNNER_TEMP/openapi.yaml"
+          cmp contracts/openapi.yaml "$RUNNER_TEMP/openapi.yaml"
+      - name: Show Swagger logs
+        if: failure()
+        run: docker compose logs
+      - name: Stop Swagger UI
+        if: always()
+        run: docker compose down
