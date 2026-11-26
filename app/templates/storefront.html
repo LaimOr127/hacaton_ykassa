@@ -20,9 +20,10 @@
           <h2 id="chat-title">Переписка</h2>
           <div id="messages" class="messages" role="log" aria-label="Сообщения">
             <p class="message agent">Здравствуйте! Опишите, что хотите заказать. Я уточню детали и покажу сумму.</p>
-            {% for text, reply in transcript %}
+            {% for text, reply, seller_reply in transcript %}
               <p class="message customer">{{ text }}</p>
               <p class="message agent">{{ reply }}</p>
+              {% if seller_reply %}<p class="message agent"><strong>Продавец</strong><br>{{ seller_reply }}</p>{% endif %}
             {% endfor %}
           </div>
           {% if not transcript and coffee_example %}
@@ -45,10 +46,11 @@
           <div class="total"><span>Итого</span><strong id="total">0 ₽</strong></div>
           <p id="deposit" hidden></p>
           <p id="payment-status" role="status"></p>
+          <div id="seller-review" class="seller-review" role="status" hidden></div>
           <div class="actions">
             <button id="pay" type="button" hidden>Подтвердить заказ</button>
             <a id="checkout" target="_blank" rel="noopener noreferrer" class="button" hidden>Открыть ЮKassa</a>
-            <button id="check-payment" type="button" class="secondary" hidden>Проверить платёж</button>
+            <button id="check-payment" type="button" class="secondary" hidden>Проверить статус</button>
             <button id="simulate" type="button" hidden>Подтвердить симуляцию</button>
             <button id="new-order" type="button" class="secondary" hidden>Начать новый заказ</button>
           </div>

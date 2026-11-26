@@ -4,7 +4,7 @@ import time
 from uuid import uuid4
 
 from .gateway import InvalidPaymentResponse, PaymentNotSent, payment_reference, trusted_checkout
-from .orders import OrderError, check_version, lookup_order, quote_for
+from .orders import MESSAGE_LEASE_SECONDS, OrderError, check_version, checkout_review, lookup_order, quote_for
 from .storage import Store
 
 
@@ -39,6 +39,12 @@ class Payments:
                     raise OrderError(409, "idempotency_conflict", "Ключ оплаты уже использован.")
                 return old, False
             check_version(order, version)
+            checkout_review(db, order_id)
+            if db.execute(
+                "SELECT 1 FROM messages WHERE order_id = ? AND result IS NULL AND started_at > ? LIMIT 1",
+                (order_id, int(time.time()) - MESSAGE_LEASE_SECONDS),
+            ).fetchone():
+                raise OrderError(409, "request_in_progress", "Дождитесь обработки сообщения перед оплатой.")
             if order["state"] == "payment_pending":
                 raise OrderError(409, "payment_in_progress", "У заказа уже есть активная попытка.")
             if order["state"] not in {"draft", "agreed"}:

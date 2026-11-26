@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Заказ из переписки
-  version: 0.2.0
+  version: 0.3.0
   description: |
     HTTP API покупателя. Примеры содержат вымышленные данные.
     Действия ЮKassa выполняются на сервере через MCP.
@@ -103,7 +103,8 @@ paths:
       description: |
         Приложение проверяет предложение агента по каталогу и применяет пакет правок
         атомарно, если версия ещё актуальна. Успешная правка повышает версию.
-        Уточнение или передача сотруднику сохраняют версию, если состав не менялся.
+        Уточнение сохраняет версию. Передача сотруднику повышает версию и блокирует оплату.
+        После ответа сотрудника покупатель отправляет уточнённый заказ.
         Пока платёж активен или заказ уже оплачен полностью либо частично,
         правки блокируются.
         Ключ дедупликации — сессия покупателя, заказ и client_message_id.
@@ -389,7 +390,7 @@ components:
                 properties:
                   code:
                     type: string
-                    enum: [idempotency_conflict, request_in_progress, payment_in_progress, order_not_payable, order_locked]
+                    enum: [idempotency_conflict, request_in_progress, payment_in_progress, order_not_payable, order_locked, seller_review_required]
                   message: {type: string}
           examples:
             stale_version:
@@ -470,6 +471,21 @@ components:
           anyOf:
             - {$ref: '#/components/schemas/ResourceId'}
             - {type: 'null'}
+        seller_review:
+          description: Запрос продавцу. Пока поле присутствует, заказ ожидает уточнения перед оплатой.
+          oneOf:
+            - type: object
+              required: [status]
+              properties:
+                status: {const: pending}
+            - type: object
+              required: [status, reply]
+              properties:
+                status: {const: answered}
+                reply: {type: string, minLength: 1, maxLength: 1000}
+        fulfilled:
+          type: boolean
+          description: Продавец отметил исполнение после подтверждённой оплаты или предоплаты.
     MessageResult:
       type: object
       required: [message_id, outcome, reply, order]

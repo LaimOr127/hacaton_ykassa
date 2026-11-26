@@ -35,6 +35,15 @@ CREATE TABLE IF NOT EXISTS messages (
     UNIQUE (order_id, request_key)
 );
 CREATE INDEX IF NOT EXISTS messages_started ON messages(started_at);
+CREATE TABLE IF NOT EXISTS seller_reviews (
+    order_id TEXT NOT NULL REFERENCES orders(id),
+    opened_message TEXT PRIMARY KEY REFERENCES messages(id),
+    opened_at INTEGER NOT NULL, reply TEXT, answered_at INTEGER, closed_at INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS open_seller_review ON seller_reviews(order_id) WHERE closed_at IS NULL;
+CREATE TABLE IF NOT EXISTS fulfilled_orders (
+    order_id TEXT PRIMARY KEY REFERENCES orders(id), fulfilled_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS model_calls (
     call_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, started_at INTEGER NOT NULL
 );
@@ -74,10 +83,31 @@ class Store:
             db.execute("INSERT OR IGNORE INTO settings VALUES ('mode', ?)", (self.mode,))
             if db.execute("SELECT value FROM settings WHERE key = 'mode'").fetchone()[0] != self.mode:
                 raise ValueError("Для каждого платёжного режима требуется отдельная база данных")
+            self.backfill_reviews(db)
+
+    @staticmethod
+    def backfill_reviews(db):
+        marker = "migration:seller-reviews"
+        if db.execute("SELECT 1 FROM settings WHERE key = ?", (marker,)).fetchone():
+            return
+        db.execute(
+            """INSERT INTO seller_reviews(order_id, opened_message, opened_at)
+               SELECT o.id, m.id, m.started_at FROM orders o JOIN messages m ON m.rowid = (
+                   SELECT max(p.rowid) FROM messages p WHERE p.order_id = o.id AND p.result IS NOT NULL
+               )
+               WHERE o.state IN ('draft', 'agreed') AND json_extract(m.result, '$.outcome') = 'handoff'
+               AND NOT EXISTS (SELECT 1 FROM seller_reviews r WHERE r.order_id = o.id)""",
+        )
+        db.execute(
+            """UPDATE orders SET version = version + 1, state = 'draft', agreed_version = NULL, attempt_id = NULL
+               WHERE id IN (SELECT order_id FROM seller_reviews WHERE closed_at IS NULL)""",
+        )
+        db.execute("INSERT INTO settings VALUES (?, '1')", (marker,))
 
     @contextmanager
     def read(self):
         with closing(self.connect()) as db:
+            db.execute("BEGIN")
             yield db
 
     @contextmanager

@@ -8,6 +8,8 @@ from pydantic import ValidationError
 from .catalog import Catalog
 from .storage import Store
 
+MESSAGE_LEASE_SECONDS = 30
+
 
 class OrderError(Exception):
     def __init__(self, status: int, code: str, message: str, **details):
@@ -25,8 +27,8 @@ def lookup_order(db, session, order_id):
     return row
 
 
-def public_order(row):
-    return {
+def public_order(db, row):
+    data = {
         "id": row["id"],
         "version": row["version"],
         "status": row["state"],
@@ -34,6 +36,35 @@ def public_order(row):
         "payment_attempt_id": row["attempt_id"],
         **json.loads(row["quote"]),
     }
+    review = db.execute("SELECT reply FROM seller_reviews WHERE order_id = ? AND closed_at IS NULL", (row["id"],)).fetchone()
+    if review:
+        data["seller_review"] = {"status": "answered", "reply": review["reply"]} if review["reply"] else {"status": "pending"}
+    if db.execute("SELECT 1 FROM fulfilled_orders WHERE order_id = ?", (row["id"],)).fetchone():
+        data["fulfilled"] = True
+    return data
+
+
+def seller_transcript(db, order_id):
+    rows = db.execute(
+        """SELECT m.text, m.result, r.reply FROM messages m LEFT JOIN seller_reviews r
+           ON r.opened_message = m.id AND r.closed_at IS NOT NULL
+           WHERE m.order_id = ? AND m.result IS NOT NULL ORDER BY m.rowid DESC LIMIT 50""",
+        (order_id,),
+    ).fetchall()
+    return [(row["text"], json.loads(row["result"])["reply"], row["reply"]) for row in reversed(rows)]
+
+
+def checkout_review(db, order_id):
+    if db.execute("SELECT 1 FROM seller_reviews WHERE order_id = ? AND closed_at IS NULL", (order_id,)).fetchone():
+        raise OrderError(409, "seller_review_required", "Уточните заказ с продавцом перед оплатой.")
+
+
+def reopen_draft(db, order_id):
+    db.execute(
+        """UPDATE orders SET version = version + 1, state = 'draft',
+           agreed_version = NULL, attempt_id = NULL WHERE id = ?""",
+        (order_id,),
+    )
 
 
 def check_version(row, version: int):
@@ -88,17 +119,20 @@ class Orders:
 
     def get(self, session, order_id) -> dict:
         with self.store.read() as db:
-            return public_order(lookup_order(db, session, order_id))
+            return public_order(db, lookup_order(db, session, order_id))
 
     def transcript(self, session, order_id):
         with self.store.read() as db:
             lookup_order(db, session, order_id)
-            rows = db.execute(
-                "SELECT text, result FROM messages WHERE order_id = ? AND result IS NOT NULL "
-                "ORDER BY rowid DESC LIMIT 50",
-                (order_id,),
-            ).fetchall()
-        return [(row["text"], json.loads(row["result"])["reply"]) for row in reversed(rows)]
+            return seller_transcript(db, order_id)
+
+    @staticmethod
+    def ensure_can_message(db, row):
+        Orders.ensure_editable(row)
+        if db.execute(
+            "SELECT 1 FROM seller_reviews WHERE order_id = ? AND reply IS NULL AND closed_at IS NULL", (row["id"],),
+        ).fetchone():
+            raise OrderError(409, "seller_review_required", "Заказ у продавца. Дождитесь его ответа.")
 
     def message(self, session, order_id, key, version, message):
         lease = uuid4().hex
@@ -113,10 +147,10 @@ class Orders:
                     raise OrderError(409, "idempotency_conflict", "Ключ сообщения уже использован.")
                 if previous["result"] is not None:
                     return json.loads(previous["result"])
-                if now - previous["started_at"] < 30:
+                if now - previous["started_at"] < MESSAGE_LEASE_SECONDS:
                     raise OrderError(409, "request_in_progress", "Сообщение ещё обрабатывается.")
             check_version(row, version)
-            self.ensure_editable(row)
+            self.ensure_can_message(db, row)
             catalog = self.catalog_for(db, session["merchant"])
             recent = db.execute(
                 "SELECT text, result FROM messages WHERE order_id = ? AND result IS NOT NULL "
@@ -140,16 +174,19 @@ class Orders:
                 (message_id, order_id, key, version, message, lease, now),
             )
             quantities = json.loads(row["quantities"])
+            seller = db.execute("SELECT reply FROM seller_reviews WHERE order_id = ? AND closed_at IS NULL", (order_id,)).fetchone()
 
         try:
             context = [(r["text"][:300], json.loads(r["result"])["reply"][:250]) for r in reversed(recent)]
+            if seller and seller["reply"]:
+                context.append(("", f"Ответ продавца: {seller['reply'][:400]}"))
             proposal = self.agent.propose(catalog, quantities, context, message)
             outcome, reply = proposal.outcome, proposal.reply
 
             with self.store.transaction() as db:
                 row = lookup_order(db, session, order_id)
                 check_version(row, version)
-                self.ensure_editable(row)
+                self.ensure_can_message(db, row)
                 claim = db.execute("SELECT lease FROM messages WHERE id = ?", (message_id,)).fetchone()
                 if claim is None or claim["lease"] != lease:
                     raise OrderError(409, "request_in_progress", "Сообщение ещё обрабатывается.")
@@ -161,17 +198,35 @@ class Orders:
                         outcome, reply = "clarification", "Какие позиции из нашего каталога вам нужны?"
                     else:
                         try:
-                            quote_for(db, row, catalog, proposal.quantities)
+                            changed = quote_for(db, row, catalog, proposal.quantities)
                         except ValueError as error:
                             outcome, reply = "clarification", str(error)
                         else:
+                            reviewed = db.execute(
+                                "UPDATE seller_reviews SET closed_at = ? WHERE order_id = ? AND closed_at IS NULL",
+                                (now, order_id),
+                            ).rowcount
+                            if reviewed and not changed:
+                                reopen_draft(db, order_id)
                             row = lookup_order(db, session, order_id)
                 if outcome == "clarification" and len(recent) == 2 and all(
                     json.loads(item["result"])["outcome"] == "clarification" for item in recent
                 ):
-                    outcome, reply = "handoff", "Потребуется уточнение у продавца. Покажите ему номер заказа."
+                    outcome = "handoff"
+                if outcome == "handoff":
+                    db.execute(
+                        "UPDATE seller_reviews SET closed_at = ? WHERE order_id = ? AND closed_at IS NULL",
+                        (now, order_id),
+                    )
+                    db.execute(
+                        "INSERT INTO seller_reviews(order_id, opened_message, opened_at) VALUES (?, ?, ?)",
+                        (order_id, message_id, now),
+                    )
+                    reopen_draft(db, order_id)
+                    row = lookup_order(db, session, order_id)
+                    reply = "Передал запрос продавцу. Ответ появится в карточке заказа."
                 result = {
-                    "message_id": message_id, "outcome": outcome, "reply": reply, "order": public_order(row),
+                    "message_id": message_id, "outcome": outcome, "reply": reply, "order": public_order(db, row),
                 }
                 db.execute("UPDATE messages SET result = ? WHERE id = ?", (json.dumps(result), message_id))
                 return result

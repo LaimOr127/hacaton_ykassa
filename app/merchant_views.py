@@ -10,7 +10,7 @@ from fastapi.responses import RedirectResponse, Response
 
 from .gateway import payment_reference
 from .merchants import CLEANING_CSV, export_catalog
-from .orders import OrderError
+from .orders import OrderError, public_order, reopen_draft, seller_transcript
 from .session_security import SESSION_TOKEN, check_csrf, csrf, digest
 
 
@@ -69,9 +69,12 @@ def merchant_routes(merchants, templates, payments):
             owner = db.execute("SELECT name, catalog_version FROM merchants WHERE slug = ?", (slug,)).fetchone()
             catalog = merchants.catalog(db, slug)
             rows = db.execute(
-                """SELECT o.id, o.state, o.quote, a.state AS payment_state, a.created_at
+                """SELECT o.id, o.state, o.quote, a.state AS payment_state,
+                   (r.order_id IS NOT NULL AND r.reply IS NULL) AS needs_reply, f.fulfilled_at
                    FROM orders o LEFT JOIN attempts a ON a.id = o.attempt_id
-                   WHERE o.merchant = ? ORDER BY o.rowid DESC LIMIT 60""",
+                   LEFT JOIN seller_reviews r ON r.order_id = o.id AND r.closed_at IS NULL
+                   LEFT JOIN fulfilled_orders f ON f.order_id = o.id
+                   WHERE o.merchant = ? ORDER BY needs_reply DESC, o.rowid DESC LIMIT 60""",
                 (slug,),
             ).fetchall()
             review = db.execute(
@@ -88,9 +91,12 @@ def merchant_routes(merchants, templates, payments):
         }
         orders = [
             {
-                "id": row["id"][:8], "state": "Требует сверки" if row["payment_state"] == "unknown" else states[row["state"]],
+                "id": row["id"], "short_id": row["id"][:8],
+                "state": "Нужен ответ" if row["needs_reply"] else
+                "Требует сверки" if row["payment_state"] == "unknown" else states[row["state"]],
                 "status_class": "review" if row["payment_state"] == "unknown" else row["state"],
                 "total": json.loads(row["quote"])["total_kopecks"],
+                "fulfilled": row["fulfilled_at"] is not None,
             }
             for row in rows
         ]
@@ -118,6 +124,62 @@ def merchant_routes(merchants, templates, payments):
                 for row in review[:20]
             ],
         }, status_code=status)
+
+    def merchant_order(db, slug, order_id):
+        row = db.execute("SELECT * FROM orders WHERE merchant = ? AND id = ?", (slug, order_id)).fetchone()
+        if row is None:
+            raise OrderError(404, "order_not_found", "Заказ не найден.")
+        return row
+
+    @router.get("/orders/{order_id}")
+    def order_page(request: Request, order_id: str):
+        slug, token = manager(request)
+        with store.read() as db:
+            order = public_order(db, merchant_order(db, slug, order_id))
+            transcript = seller_transcript(db, order_id)
+            review = db.execute(
+                "SELECT opened_message FROM seller_reviews WHERE order_id = ? AND closed_at IS NULL AND reply IS NULL",
+                (order_id,),
+            ).fetchone()
+        return templates.TemplateResponse(request, "merchant_order.html", {
+            "order": order, "transcript": transcript, "csrf": csrf(token),
+            "simulated": settings.mode == "simulated", "review_id": review["opened_message"] if review else None,
+        })
+
+    @router.post("/orders/{order_id}/reply")
+    def reply_to_order(
+        request: Request, order_id: str, token: Annotated[str, Form(max_length=128)],
+        reply: Annotated[str, Form(min_length=1, max_length=1000)],
+        review_id: Annotated[str, Form(min_length=1, max_length=128)],
+    ):
+        slug, session = manager(request)
+        check_csrf(request, settings.origin, session, token)
+        reply = reply.strip()
+        with store.transaction() as db:
+            order = merchant_order(db, slug, order_id)
+            if not reply:
+                raise OrderError(400, "invalid_reply", "Введите текст ответа.")
+            if order["state"] not in {"draft", "agreed"}:
+                raise OrderError(409, "order_locked", "Заказ уже подтверждён для оплаты.")
+            if not db.execute(
+                """UPDATE seller_reviews SET reply = ?, answered_at = ?
+                   WHERE order_id = ? AND opened_message = ? AND reply IS NULL AND closed_at IS NULL""",
+                (reply, int(time.time()), order_id, review_id),
+            ).rowcount:
+                raise OrderError(409, "review_unavailable", "Заказ больше не ждёт ответа.")
+            reopen_draft(db, order_id)
+        return RedirectResponse(f"/merchant/orders/{order_id}", status_code=303)
+
+    @router.post("/orders/{order_id}/fulfill")
+    def fulfill_order(request: Request, order_id: str, token: Annotated[str, Form(max_length=128)]):
+        slug, session = manager(request)
+        check_csrf(request, settings.origin, session, token)
+        with store.transaction() as db:
+            order = merchant_order(db, slug, order_id)
+            if order["state"] not in {"paid", "deposit_received"}:
+                raise OrderError(409, "order_not_paid", "Дождитесь оплаты или предоплаты.")
+            db.execute("INSERT OR IGNORE INTO fulfilled_orders VALUES (?, ?)", (order_id, int(time.time())))
+        return RedirectResponse(f"/merchant/orders/{order_id}", status_code=303)
 
     @router.get("/login")
     def login_page(request: Request):
