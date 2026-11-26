@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Вход · Кабинет продавца</title>
+  <link rel="stylesheet" href="/static/order.css">
+  <link rel="stylesheet" href="/static/merchant.css">
+</head>
+<body class="merchant">
+  <header class="masthead"><a class="brand" href="/merchant/login">Заказ из переписки</a><a href="/">Витрина</a></header>
+  <main class="entry">
+    <h1>Кабинет продавца</h1>
+    {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+    <div class="access-grid">
+      <section class="workspace-panel" aria-labelledby="login-heading">
+        <h2 id="login-heading">Войти в магазин</h2>
+        <form method="post" action="/merchant/login">
+          <input type="hidden" name="token" value="{{ csrf }}">
+          <label for="login-slug">Адрес магазина</label>
+          <input id="login-slug" name="slug" required minlength="3" maxlength="32" autocomplete="username">
+          <label for="login-code">Код владельца</label>
+          <input id="login-code" name="code" type="password" required maxlength="128" autocomplete="current-password">
+          <button>Войти</button>
+        </form>
+      </section>
+      {% if enable_setup %}
+      <section class="workspace-panel" aria-labelledby="setup-heading">
+        <h2 id="setup-heading">Подключить магазин</h2>
+        <p>После регистрации загрузите прайс и получите адрес витрины.</p>
+        <form method="post" action="/merchant/register">
+          <input type="hidden" name="token" value="{{ csrf }}">
+          <label for="name">Название</label><input id="name" name="name" required maxlength="80" autocomplete="organization">
+          <label for="slug">Адрес магазина</label>
+          <input id="slug" name="slug" required minlength="3" maxlength="32" pattern="[a-z][a-z0-9\-]{2,31}"
+                 placeholder="cleaning" aria-describedby="slug-help">
+          <p id="slug-help" class="hint">Латинские буквы, цифры и дефисы. Начните с буквы.</p>
+          <label for="owner-code">Придумайте код владельца</label>
+          <input id="owner-code" name="code" type="password" required minlength="16" maxlength="128" autocomplete="new-password">
+          <label for="setup-code">Код подключения от администратора сервера</label>
+          <input id="setup-code" name="setup" type="password" required maxlength="256" autocomplete="off">
+          <button>Создать магазин</button>
+        </form>
+      </section>
+      {% endif %}
+    </div>
+  </main>
+</body>
+</html>

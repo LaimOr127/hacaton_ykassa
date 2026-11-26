@@ -1,5 +1,6 @@
 import json
 import uuid
+from contextlib import asynccontextmanager
 from decimal import Decimal
 from typing import Literal
 from urllib.parse import urlsplit
@@ -75,22 +76,31 @@ class YooKassa:
     def __init__(self, token: str):
         self.token = token
 
+    @asynccontextmanager
+    async def session(self):
+        with anyio.fail_after(18):
+            async with httpx.AsyncClient(
+                headers={"Authorization": f"Bearer {self.token}"}, timeout=10, follow_redirects=False,
+            ) as client:
+                async with streamable_http_client("https://mcp.yookassa.ru", http_client=client) as (read, write, _):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        yield session
+
+    def check(self) -> bool:
+        async def available():
+            async with self.session() as session:
+                listed = await session.list_tools()
+                return {"create_payment", "get_payment"} <= {tool.name for tool in listed.tools}
+
+        return anyio.run(available)
+
     async def call(self, name: str, arguments: dict) -> Payment:
         tool_started = False
         try:
-            with anyio.fail_after(18):
-                async with httpx.AsyncClient(
-                    headers={"Authorization": f"Bearer {self.token}"},
-                    timeout=10,
-                    follow_redirects=False,
-                ) as client:
-                    async with streamable_http_client(
-                        "https://mcp.yookassa.ru", http_client=client,
-                    ) as (read, write, _):
-                        async with ClientSession(read, write) as session:
-                            await session.initialize()
-                            tool_started = True
-                            response = await session.call_tool(name, arguments)
+            async with self.session() as session:
+                tool_started = True
+                response = await session.call_tool(name, arguments)
         except Exception as error:
             connection_refused = only_errors(error, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
             if name == "create_payment" and (not tool_started or connection_refused):

@@ -57,9 +57,9 @@ def quote_for(db, row, catalog: Catalog, quantities: dict) -> bool:
 
 
 class Orders:
-    def __init__(self, store: Store, catalog: Catalog, agent):
+    def __init__(self, store: Store, catalog_for, agent):
         self.store = store
-        self.catalog = catalog
+        self.catalog_for = catalog_for
         self.agent = agent
 
     def create(self, session, key: str):
@@ -73,14 +73,17 @@ class Orders:
             order_id = uuid4().hex
             db.execute(
                 "INSERT INTO orders(id, session_id, merchant, create_key, quote) VALUES (?, ?, ?, ?, ?)",
-                (order_id, session["id"], session["merchant"], key, json.dumps(self.catalog.price({}))),
+                (order_id, session["id"], session["merchant"], key, json.dumps(self.empty_card(order_id, quote_only=True))),
             )
             return self.empty_card(order_id)
 
-    def empty_card(self, order_id):
+    def empty_card(self, order_id, *, quote_only=False):
+        prices = {"items": [], "total_kopecks": 0, "payable_kopecks": 0, "balance_kopecks": 0, "currency": "RUB"}
+        if quote_only:
+            return prices
         return {
             "id": order_id, "version": 1, "status": "draft", "agreed_version": None,
-            "payment_attempt_id": None, **self.catalog.price({}),
+            "payment_attempt_id": None, **prices,
         }
 
     def get(self, session, order_id) -> dict:
@@ -114,6 +117,7 @@ class Orders:
                     raise OrderError(409, "request_in_progress", "Сообщение ещё обрабатывается.")
             check_version(row, version)
             self.ensure_editable(row)
+            catalog = self.catalog_for(db, session["merchant"])
             recent = db.execute(
                 "SELECT text, result FROM messages WHERE order_id = ? AND result IS NOT NULL "
                 "ORDER BY rowid DESC LIMIT 2",
@@ -139,16 +143,8 @@ class Orders:
 
         try:
             context = [(r["text"][:300], json.loads(r["result"])["reply"][:250]) for r in reversed(recent)]
-            proposal = self.agent.propose(self.catalog, quantities, context, message)
-            unknown = proposal.quantities.keys() - self.catalog.products.keys()
-            if unknown:
-                outcome, reply = "clarification", "Какие позиции из нашего каталога вам нужны?"
-            else:
-                outcome, reply = proposal.outcome, proposal.reply
-            if outcome == "clarification" and len(recent) == 2 and all(
-                json.loads(item["result"])["outcome"] == "clarification" for item in recent
-            ):
-                outcome, reply = "handoff", "Потребуется уточнение у продавца. Покажите ему номер заказа."
+            proposal = self.agent.propose(catalog, quantities, context, message)
+            outcome, reply = proposal.outcome, proposal.reply
 
             with self.store.transaction() as db:
                 row = lookup_order(db, session, order_id)
@@ -158,8 +154,22 @@ class Orders:
                 if claim is None or claim["lease"] != lease:
                     raise OrderError(409, "request_in_progress", "Сообщение ещё обрабатывается.")
                 if outcome == "order_updated":
-                    quote_for(db, row, self.catalog, proposal.quantities)
-                    row = lookup_order(db, session, order_id)
+                    current_catalog = self.catalog_for(db, session["merchant"])
+                    if current_catalog != catalog:
+                        outcome, reply = "clarification", "Прайс обновился. Повторите запрос по актуальным условиям."
+                    elif not proposal.quantities.keys() <= catalog.products.keys():
+                        outcome, reply = "clarification", "Какие позиции из нашего каталога вам нужны?"
+                    else:
+                        try:
+                            quote_for(db, row, catalog, proposal.quantities)
+                        except ValueError as error:
+                            outcome, reply = "clarification", str(error)
+                        else:
+                            row = lookup_order(db, session, order_id)
+                if outcome == "clarification" and len(recent) == 2 and all(
+                    json.loads(item["result"])["outcome"] == "clarification" for item in recent
+                ):
+                    outcome, reply = "handoff", "Потребуется уточнение у продавца. Покажите ему номер заказа."
                 result = {
                     "message_id": message_id, "outcome": outcome, "reply": reply, "order": public_order(row),
                 }

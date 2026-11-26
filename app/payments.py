@@ -2,7 +2,6 @@ import json
 import time
 from uuid import uuid4
 
-from .catalog import Catalog
 from .gateway import InvalidPaymentResponse, PaymentNotSent, trusted_checkout
 from .orders import OrderError, check_version, lookup_order, quote_for
 from .storage import Store
@@ -23,12 +22,12 @@ def public_attempt(row):
 
 
 class Payments:
-    def __init__(self, store: Store, catalog: Catalog, gateway):
+    def __init__(self, store: Store, catalog_for, gateway_for):
         self.store = store
-        self.catalog = catalog
-        self.gateway = gateway
+        self.catalog_for = catalog_for
+        self.gateway_for = gateway_for
 
-    def reserve(self, session, order_id, key, version):
+    def reserve(self, session, order_id, key, version, connected):
         with self.store.transaction() as db:
             order = lookup_order(db, session, order_id)
             old = db.execute(
@@ -44,12 +43,19 @@ class Payments:
             if order["state"] not in {"draft", "agreed"}:
                 raise OrderError(409, "order_not_payable", "Заказ уже оплачен.")
             quantities = json.loads(order["quantities"])
-            if not quantities.keys() <= self.catalog.products.keys():
+            catalog = self.catalog_for(db, session["merchant"])
+            if not quantities.keys() <= catalog.products.keys():
                 raise OrderError(409, "order_not_payable", "Некоторые позиции больше недоступны.")
-            if quote_for(db, order, self.catalog, quantities):
+            try:
+                repriced = quote_for(db, order, catalog, quantities)
+            except ValueError as error:
+                raise OrderError(409, "order_not_payable", str(error)) from error
+            if repriced:
                 return None, False
             if json.loads(order["quote"])["payable_kopecks"] <= 0:
                 raise OrderError(409, "order_not_payable", "Сначала добавьте позиции в заказ.")
+            if not connected:
+                raise OrderError(503, "payment_unavailable", "Продавец ещё не подключил оплату.")
             attempt_id = uuid4().hex
             db.execute(
                 """INSERT INTO attempts(id, order_id, request_key, order_version, snapshot, state, created_at)
@@ -63,13 +69,14 @@ class Payments:
             return db.execute("SELECT * FROM attempts WHERE id = ?", (attempt_id,)).fetchone(), True
 
     def create(self, session, order_id, key, version):
-        attempt, created = self.reserve(session, order_id, key, version)
+        gateway = self.gateway_for(session["merchant"])
+        attempt, created = self.reserve(session, order_id, key, version, gateway is not None)
         if attempt is None:
             raise OrderError(409, "stale_version", "Цена изменилась. Подтвердите новый итог.", current_version=version + 1)
         if not created:
             return public_attempt(attempt), False
         try:
-            payment = self.gateway.create(public_attempt(attempt)["amount_kopecks"], attempt["id"])
+            payment = gateway.create(public_attempt(attempt)["amount_kopecks"], attempt["id"])
         except PaymentNotSent:
             self.mark_failed(attempt)
         except InvalidPaymentResponse as error:
@@ -96,8 +103,11 @@ class Payments:
             if needs_check:
                 db.execute("UPDATE attempts SET next_check = ? WHERE id = ?", (now + 20, attempt_id))
         if needs_check:
+            gateway = self.gateway_for(session["merchant"])
+            if gateway is None:
+                return public_attempt(attempt)
             try:
-                payment = self.gateway.get(attempt["external_id"])
+                payment = gateway.get(attempt["external_id"])
             except InvalidPaymentResponse:
                 self.mark_unknown(attempt_id)
             except Exception:
@@ -183,6 +193,7 @@ class Payments:
             row = self.lookup(db, session, order_id, attempt_id)
         if row["state"] != "pending":
             raise OrderError(409, "order_not_payable", "Оплачивать можно ожидающий платёж.")
-        self.gateway.approve(row["external_id"])
-        self.record(row, self.gateway.get(row["external_id"]), verified=True)
+        gateway = self.gateway_for(session["merchant"])
+        gateway.approve(row["external_id"])
+        self.record(row, gateway.get(row["external_id"]), verified=True)
         return self.get(session, order_id, attempt_id)

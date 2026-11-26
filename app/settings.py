@@ -13,6 +13,9 @@ class Settings:
     mcp_token: str = field(default="", repr=False)
     llm_url: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4.1-mini"
+    setup_key: str = field(default="", repr=False)
+    vault_key: str = field(default="", repr=False)
+    default_owner_code: str = field(default="", repr=False)
 
     def __post_init__(self):
         origin = urlsplit(self.origin)
@@ -31,8 +34,12 @@ class Settings:
             raise ValueError("LLM_BASE_URL должен использовать HTTPS")
         if self.mode not in {"simulated", "live"}:
             raise ValueError("APP_MODE должен быть simulated или live")
-        if self.mode == "live" and not (self.mcp_token and self.llm_key):
-            raise ValueError("Для live нужны YOOKASSA_MCP_TOKEN и LLM_API_KEY")
+        if self.mode == "live" and not self.llm_key:
+            raise ValueError("Для live нужен LLM_API_KEY")
+        if self.setup_key and len(self.setup_key) < 24:
+            raise ValueError("MERCHANT_SETUP_KEY должен содержать не менее 24 символов")
+        if self.default_owner_code and not 16 <= len(self.default_owner_code) <= 128:
+            raise ValueError("COFFEE_OWNER_CODE должен содержать от 16 до 128 символов")
 
     @property
     def secure(self) -> bool:
@@ -52,4 +59,7 @@ class Settings:
             mcp_token=os.getenv("YOOKASSA_MCP_TOKEN", ""),
             llm_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
             llm_model=os.getenv("LLM_MODEL", "gpt-4.1-mini"),
+            setup_key=os.getenv("MERCHANT_SETUP_KEY", ""),
+            vault_key=os.getenv("MERCHANT_VAULT_KEY", ""),
+            default_owner_code=os.getenv("COFFEE_OWNER_CODE", ""),
         )

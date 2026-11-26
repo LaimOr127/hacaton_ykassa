@@ -28,6 +28,8 @@ SYSTEM = """Ты принимаешь заказ на русском языке.
 outcome: order_updated, clarification или handoff.
 При order_updated верни весь актуальный состав: quantities — объект, где ключи — SKU
 из каталога, а значения — целое количество от 1 до 200. Для удаления убери SKU.
+У позиции с basis area значение — площадь в целых квадратных метрах. У позиции fixed
+значение 1. Если площадь не указана или указана неоднозначно, уточни её у покупателя.
 Используй прежний состав при относительных правках. Например, замена двух штук одного SKU
 на другой сохраняет общую сумму количеств. При неясности спроси, не угадывай.
 При clarification и handoff quantities — пустой объект. Для индивидуальной работы вне
@@ -41,7 +43,7 @@ class ModelAgent:
         self.settings = settings
 
     def propose(self, catalog: Catalog, quantities: dict, recent: list, message: str) -> Proposal:
-        allowed = {sku: product.title for sku, product in catalog.products.items()}
+        allowed = {sku: {"title": product.title, "basis": product.basis} for sku, product in catalog.products.items()}
         response = httpx.post(
             f"{self.settings.llm_url}/chat/completions",
             headers={"Authorization": f"Bearer {self.settings.llm_key}"},
@@ -72,6 +74,17 @@ class DemoAgent:
 
     def propose(self, catalog: Catalog, quantities: dict, recent: list, message: str) -> Proposal:
         text = message.casefold().strip().rstrip(".!?")
+        cleaning = re.fullmatch(r"нужна уборка квартиры (\d{1,3})\s*м[²2]( и чистка духовки)?", text)
+        if cleaning and "cleaning" in catalog.products:
+            area = int(cleaning.group(1))
+            wants_oven = bool(cleaning.group(2))
+            if 1 <= area <= 200 and (not wants_oven or "oven" in catalog.products):
+                items = {"cleaning": area}
+                if wants_oven:
+                    items["oven"] = 1
+                return Proposal(outcome="order_updated", quantities=items, reply="Проверьте состав и сумму предоплаты.")
+        if not {"breakfast", "vegetarian"} <= catalog.products.keys():
+            return Proposal(outcome="clarification", quantities={}, reply="В симуляции попробуйте опубликованный пример для этого магазина.")
         start = re.fullmatch(r"(\d{1,3})\s+завтрак\w*,\s*из них\s+(\d{1,3})\s+вегетариан\w*", text)
         replace = re.fullmatch(r"замен\w*\s+(два|две|\d{1,3})\s+обычн\w*\s+завтрак\w*\s+на\s+вегетариан\w*", text)
         if start:

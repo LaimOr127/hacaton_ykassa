@@ -1,0 +1,51 @@
+.merchant a { color: var(--accent); }
+.merchant a.button { color: var(--on-accent); }
+.merchant .brand { color: var(--ink); }
+.merchant .inline { margin: 0; }
+.merchant-heading, .panel-heading, .catalog-tools {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+}
+.merchant-heading h1, .panel-heading h2 { margin: 0; }
+.merchant-heading { margin-bottom: 24px; }
+.merchant-heading p, .panel-heading p { margin: 0; }
+.section-nav {
+  display: flex; flex-wrap: wrap; gap: 18px; border-bottom: 1px solid var(--edge); margin: 0 0 24px;
+  padding-bottom: 12px; font-weight: 650;
+}
+.merchant-layout, .access-grid {
+  display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr); gap: 18px; align-items: start;
+}
+.workspace-panel { background: var(--panel); border: 1px solid var(--edge); border-radius: 12px; padding: 20px; min-width: 0; }
+.orders-panel { border-top: 4px solid var(--accent); }
+.catalog-panel { grid-column: 1 / -1; }
+.merchant table { border-collapse: collapse; width: 100%; text-align: left; margin-top: 18px; }
+.merchant th, .merchant td { padding: 10px 7px; border-bottom: 1px solid var(--edge); }
+.merchant th { font-weight: 650; }
+.merchant .money { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pill { display: inline-block; padding: 3px 8px; border-radius: 6px; background: var(--reply); font-size: .92rem; margin: 0; }
+.pill.paid, .pill.deposit_received { font-weight: 700; color: var(--accent); }
+.pill.review { color: var(--error); font-weight: 700; }
+.merchant input:not([type=hidden]) {
+  font: inherit; color: var(--ink); background: var(--canvas); border: 1px solid var(--edge);
+  border-radius: 6px; padding: 8px 10px; min-height: 44px; width: 100%;
+}
+.merchant #deposit { width: min(100%, 9rem); }
+.merchant #catalog-csv { font-family: ui-monospace, Consolas, monospace; }
+.merchant .catalog-tools { justify-content: flex-start; }
+.merchant #catalog-file { width: min(100%, 19rem); }
+.hint { color: var(--muted); font-size: .92rem; }
+.merchant form .hint { margin: 0; }
+.merchant .entry { max-width: 850px; }
+.merchant .access-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.error, .notice { padding: 10px 14px; background: var(--reply); border-inline-start: 3px solid currentColor; }
+.error { color: var(--error); }
+.notice { color: var(--accent); }
+.catalog-list { padding-inline-start: 22px; }
+.catalog-list .hint { margin-inline-start: 5px; }
+
+@media (max-width: 760px) {
+  .merchant-layout, .merchant .access-grid { grid-template-columns: 1fr; }
+  .workspace-panel { padding: 14px; }
+  .merchant th, .merchant td { padding: 8px 4px; }
+  .section-nav { gap: 11px; }
+}

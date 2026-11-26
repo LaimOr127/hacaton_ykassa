@@ -1,0 +1,187 @@
+import csv
+import hmac
+import json
+import secrets
+import time
+from typing import Annotated
+
+from fastapi import APIRouter, Form, Request
+from fastapi.responses import RedirectResponse, Response
+
+from .merchants import CLEANING_CSV, export_catalog
+from .orders import OrderError
+from .session_security import SESSION_TOKEN, check_csrf, csrf, digest
+
+
+def merchant_routes(merchants, templates):
+    router = APIRouter(prefix="/merchant")
+    store, settings = merchants.store, merchants.settings
+    prefix = "__Host-" if settings.secure else ""
+    entry_cookie = prefix + "merchant_entry"
+    session_cookie = prefix + "merchant_session"
+    age = 8 * 3600
+
+    def manager(request):
+        token = request.cookies.get(session_cookie, "")
+        if not SESSION_TOKEN.fullmatch(token):
+            raise OrderError(401, "merchant_session_required", "Войдите в кабинет продавца.")
+        with store.read() as db:
+            row = db.execute(
+                "SELECT merchant FROM merchant_sessions WHERE id = ? AND expires_at > ?",
+                (digest(token), int(time.time())),
+            ).fetchone()
+        if not row:
+            raise OrderError(401, "merchant_session_required", "Сессия истекла. Войдите снова.")
+        return row["merchant"], token
+
+    def entrance(request, message="", status=200):
+        token = secrets.token_urlsafe(32)
+        response = templates.TemplateResponse(request, "merchant_login.html", {
+            "csrf": csrf(token), "enable_setup": bool(settings.setup_key), "error": message,
+        }, status_code=status)
+        response.set_cookie(entry_cookie, token, max_age=900, httponly=True, secure=settings.secure, samesite="strict")
+        return response
+
+    def begin(request, submitted):
+        token = request.cookies.get(entry_cookie, "")
+        if not SESSION_TOKEN.fullmatch(token):
+            raise OrderError(403, "invalid_origin", "Откройте форму входа заново.")
+        check_csrf(request, settings.origin, token, submitted)
+        address = request.client.host if request.client else "unknown"
+        if not merchants.limit_auth(address):
+            raise OrderError(429, "rate_limited", "Слишком много попыток. Попробуйте через несколько минут.")
+
+    def make_session(request, slug):
+        token = secrets.token_urlsafe(32)
+        old = request.cookies.get(session_cookie, "")
+        with store.transaction() as db:
+            now = int(time.time())
+            db.execute("DELETE FROM merchant_sessions WHERE id = ? OR expires_at <= ?", (digest(old), now))
+            db.execute("INSERT INTO merchant_sessions VALUES (?, ?, ?)", (digest(token), slug, now + age))
+        response = RedirectResponse("/merchant", status_code=303)
+        response.delete_cookie(entry_cookie, httponly=True, secure=settings.secure, samesite="strict")
+        response.set_cookie(session_cookie, token, max_age=age, httponly=True, secure=settings.secure, samesite="strict")
+        return response
+
+    def dashboard(request, slug, token, *, error="", status=200, notice="", draft_csv=None, draft_deposit=None):
+        with store.read() as db:
+            owner = db.execute("SELECT name, catalog_version FROM merchants WHERE slug = ?", (slug,)).fetchone()
+            catalog = merchants.catalog(db, slug)
+            rows = db.execute(
+                """SELECT o.id, o.state, o.quote, a.state AS payment_state, a.created_at
+                   FROM orders o LEFT JOIN attempts a ON a.id = o.attempt_id
+                   WHERE o.merchant = ? ORDER BY o.rowid DESC LIMIT 60""",
+                (slug,),
+            ).fetchall()
+        types = {"fixed": "Фиксированная", "unit": "За единицу", "area": "По площади"}
+        states = {
+            "draft": "Черновик", "agreed": "Готов к оплате", "payment_pending": "Ожидает оплаты",
+            "paid": "Оплачен", "deposit_received": "Предоплата получена",
+        }
+        orders = [
+            {
+                "id": row["id"][:8], "state": "Требует сверки" if row["payment_state"] == "unknown" else states[row["state"]],
+                "status_class": "review" if row["payment_state"] == "unknown" else row["state"],
+                "total": json.loads(row["quote"])["total_kopecks"],
+            }
+            for row in rows
+        ]
+        products = [
+            {"sku": sku, "title": product.title, "basis": types[product.basis]}
+            for sku, product in catalog.products.items()
+        ] if catalog else []
+        return templates.TemplateResponse(request, "merchant.html", {
+            "slug": slug, "name": owner["name"], "csrf": csrf(token), "error": error, "notice": notice,
+            "mode": settings.mode, "connected": bool(merchants.token(slug)), "vault_ready": merchants.vault is not None,
+            "catalog_ready": catalog is not None,
+            "catalog_version": owner["catalog_version"],
+            "deposit": draft_deposit if draft_deposit is not None else catalog.deposit_percent if catalog else 100,
+            "orders": orders, "products": products,
+            "catalog_csv": draft_csv if draft_csv is not None else export_catalog(catalog.products) if catalog else "",
+            "paid_count": sum(row["state"] in {"paid", "deposit_received"} for row in rows),
+        }, status_code=status)
+
+    @router.get("/login")
+    def login_page(request: Request):
+        return entrance(request)
+
+    @router.post("/login")
+    def login(request: Request, token: Annotated[str, Form(max_length=128)], slug: Annotated[str, Form(max_length=32)],
+              code: Annotated[str, Form(max_length=128)]):
+        begin(request, token)
+        slug = slug.strip().lower()
+        if not merchants.valid_code(slug, code):
+            return entrance(request, "Проверьте адрес магазина и код доступа.", 401)
+        return make_session(request, slug)
+
+    @router.post("/register")
+    def register(request: Request, token: Annotated[str, Form(max_length=128)], slug: Annotated[str, Form(max_length=32)],
+                 name: Annotated[str, Form(max_length=80)], code: Annotated[str, Form(max_length=128)],
+                 setup: Annotated[str, Form(max_length=256)]):
+        begin(request, token)
+        if not settings.setup_key or not hmac.compare_digest(setup.encode(), settings.setup_key.encode()):
+            return entrance(request, "Проверьте код подключения.", 403)
+        slug = slug.strip().lower()
+        try:
+            merchants.register(slug, name.strip(), code)
+        except ValueError as error:
+            return entrance(request, str(error), 400)
+        return make_session(request, slug)
+
+    @router.get("")
+    def home(request: Request):
+        try:
+            slug, token = manager(request)
+        except OrderError:
+            return RedirectResponse("/merchant/login", status_code=303)
+        notices = {"catalog": "Прайс опубликован.", "connection": "Токен сохранён."}
+        return dashboard(request, slug, token, notice=notices.get(request.query_params.get("updated"), ""))
+
+    @router.get("/example.csv")
+    def example():
+        return Response(CLEANING_CSV, media_type="text/csv", headers={"Content-Disposition": "attachment; filename=cleaning.csv"})
+
+    @router.post("/catalog")
+    def publish(request: Request, token: Annotated[str, Form(max_length=128)],
+                catalog_csv: Annotated[str, Form(max_length=12_000)], deposit: Annotated[int, Form()],
+                catalog_version: Annotated[int, Form(ge=0)]):
+        slug, session = manager(request)
+        check_csrf(request, settings.origin, session, token)
+        try:
+            updated = merchants.publish(slug, catalog_csv, deposit, catalog_version)
+        except (ValueError, csv.Error) as error:
+            return dashboard(
+                request, slug, session, error=str(error), status=400,
+                draft_csv=catalog_csv, draft_deposit=deposit,
+            )
+        if not updated:
+            return dashboard(
+                request, slug, session, error="Прайс изменился в другой вкладке. Сравните свой ввод с опубликованными позициями.",
+                status=409, draft_csv=catalog_csv, draft_deposit=deposit,
+            )
+        return RedirectResponse("/merchant?updated=catalog", status_code=303)
+
+    @router.post("/connection")
+    def connect(request: Request, token: Annotated[str, Form(max_length=128)],
+                mcp_token: Annotated[str, Form(max_length=4096)]):
+        slug, session = manager(request)
+        check_csrf(request, settings.origin, session, token)
+        if settings.mode != "live":
+            raise OrderError(409, "simulated_mode", "Подключение доступно в режиме тестовой кассы.")
+        try:
+            merchants.connect(slug, mcp_token.strip())
+        except ValueError as error:
+            return dashboard(request, slug, session, error=str(error), status=400)
+        return RedirectResponse("/merchant?updated=connection", status_code=303)
+
+    @router.post("/logout")
+    def logout(request: Request, token: Annotated[str, Form(max_length=128)]):
+        _, session = manager(request)
+        check_csrf(request, settings.origin, session, token)
+        with store.transaction() as db:
+            db.execute("DELETE FROM merchant_sessions WHERE id = ?", (digest(session),))
+        response = RedirectResponse("/merchant/login", status_code=303)
+        response.delete_cookie(session_cookie, httponly=True, secure=settings.secure, samesite="strict")
+        return response
+
+    return router

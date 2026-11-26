@@ -1,9 +1,9 @@
 openapi: 3.1.0
 info:
   title: Заказ из переписки
-  version: 0.1.0
+  version: 0.2.0
   description: |
-    HTTP API покупателя первого этапа. Примеры содержат вымышленные данные.
+    HTTP API покупателя. Примеры содержат вымышленные данные.
     Действия ЮKassa выполняются на сервере через MCP.
     Все ответы с данными сессии или заказа используют Cache-Control no-store.
 servers:
@@ -16,6 +16,8 @@ tags:
     description: Подтверждение версии и платёжные попытки
 paths:
   /orders:
+    parameters:
+      - $ref: '#/components/parameters/Shop'
     post:
       tags: [Orders]
       operationId: createOrder
@@ -56,6 +58,7 @@ paths:
         '409': {$ref: '#/components/responses/Conflict'}
   /orders/{orderId}:
     parameters:
+      - $ref: '#/components/parameters/Shop'
       - $ref: '#/components/parameters/OrderId'
     get:
       tags: [Orders]
@@ -91,6 +94,7 @@ paths:
         '404': {$ref: '#/components/responses/NotFound'}
   /orders/{orderId}/messages:
     parameters:
+      - $ref: '#/components/parameters/Shop'
       - $ref: '#/components/parameters/OrderId'
     post:
       tags: [Orders]
@@ -192,6 +196,7 @@ paths:
               schema: {$ref: '#/components/schemas/Error'}
   /orders/{orderId}/payment-attempts:
     parameters:
+      - $ref: '#/components/parameters/Shop'
       - $ref: '#/components/parameters/OrderId'
     post:
       tags: [Payments]
@@ -259,8 +264,14 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
+        '503':
+          description: Продавец ещё не подключил оплату.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
   /orders/{orderId}/payment-attempts/{attemptId}:
     parameters:
+      - $ref: '#/components/parameters/Shop'
       - $ref: '#/components/parameters/OrderId'
       - name: attemptId
         in: path
@@ -309,6 +320,12 @@ components:
       name: X-CSRF-Token
       description: Токен из HTML приложения. Сервер проверяет его привязку к выбранной сессии и точное совпадение Origin.
   parameters:
+    Shop:
+      name: X-Shop
+      in: header
+      required: false
+      schema: {type: string, pattern: '^[a-z][a-z0-9-]{2,31}$', default: coffee}
+      description: Код витрины. Сначала откройте /s/{slug}, чтобы создать покупательскую сессию для этой витрины.
     OrderId:
       name: orderId
       in: path
