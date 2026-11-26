@@ -70,13 +70,13 @@ def test_mcp_sdk_calls_official_payment_tools(monkeypatch):
     ]
 
 
-@pytest.mark.parametrize("handshake_ok", [False, True])
-def test_only_failure_before_sending_create_is_retriable(monkeypatch, handshake_ok):
+@pytest.mark.parametrize("failure", ["handshake", "connect", "read", "invalid_get"])
+def test_transport_distinguishes_unsubmitted_create_and_invalid_read(monkeypatch, failure):
     actual_transport = gateway.streamable_http_client
 
     def fake_mcp(request):
         rpc = json.loads(request.content)
-        if not handshake_ok:
+        if failure == "handshake":
             assert rpc["method"] == "initialize"
             return httpx.Response(401)
         if rpc["method"] == "initialize":
@@ -92,6 +92,13 @@ def test_only_failure_before_sending_create_is_retriable(monkeypatch, handshake_
         if rpc["method"] == "notifications/initialized":
             return httpx.Response(202)
         assert rpc["method"] == "tools/call"
+        if failure == "connect":
+            raise httpx.ConnectError("Соединение не установлено")
+        if failure == "invalid_get":
+            return httpx.Response(200, json={
+                "jsonrpc": "2.0", "id": rpc["id"],
+                "result": {"content": [], "structuredContent": []},
+            })
         raise httpx.ReadError("Соединение оборвалось")
 
     @asynccontextmanager
@@ -101,7 +108,13 @@ def test_only_failure_before_sending_create_is_retriable(monkeypatch, handshake_
                 yield streams
 
     monkeypatch.setattr(gateway, "streamable_http_client", local_transport)
-    with pytest.raises(Exception if handshake_ok else gateway.PaymentNotSent) as recorded:
-        gateway.YooKassa("test-token-placeholder").create(1000, "attempt-123")
-    if handshake_ok:
+    provider = gateway.YooKassa("test-token-placeholder")
+    if failure == "invalid_get":
+        with pytest.raises(gateway.InvalidPaymentResponse):
+            provider.get("attempt-123")
+    else:
+        expected = Exception if failure == "read" else gateway.PaymentNotSent
+        with pytest.raises(expected) as recorded:
+            provider.create(1000, "attempt-123")
+    if failure == "read":
         assert not isinstance(recorded.value, gateway.PaymentNotSent)

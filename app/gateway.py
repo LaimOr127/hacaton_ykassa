@@ -39,6 +39,19 @@ class InvalidPaymentResponse(Exception):
         super().__init__("Некорректный ответ MCP")
 
 
+def only_errors(error: Exception, types: tuple[type[Exception], ...]) -> bool:
+    if isinstance(error, ExceptionGroup):
+        matched, rest = error.split(types)
+        return matched is not None and rest is None
+    return isinstance(error, types)
+
+
+def has_error(error: Exception, types: tuple[type[Exception], ...]) -> bool:
+    if isinstance(error, ExceptionGroup):
+        return error.subgroup(types) is not None
+    return isinstance(error, types)
+
+
 def amount_value(kopecks: int) -> str:
     return f"{kopecks // 100}.{kopecks % 100:02d}"
 
@@ -79,8 +92,12 @@ class YooKassa:
                             tool_started = True
                             response = await session.call_tool(name, arguments)
         except Exception as error:
-            if name == "create_payment" and not tool_started:
+            connection_refused = only_errors(error, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+            if name == "create_payment" and (not tool_started or connection_refused):
                 raise PaymentNotSent() from error
+            if name == "get_payment" and has_error(error, (ValidationError, ValueError)):
+                # SDK валидирует JSON-RPC до возврата результата инструмента.
+                raise InvalidPaymentResponse() from error
             raise
         if response.isError:
             raise ValueError("MCP вернул ошибку операции")

@@ -12,7 +12,7 @@ from jsonschema import Draft202012Validator
 from referencing import Registry, Resource
 
 from app.catalog import COFFEE, Product
-from app.gateway import Payment, PaymentNotSent, ProviderAmount, amount_value
+from app.gateway import InvalidPaymentResponse, Payment, PaymentNotSent, ProviderAmount, amount_value
 from app.main import create_app
 from app.settings import Settings
 
@@ -228,6 +228,7 @@ def test_small_scope_catalog_can_charge_deposit(settings):
         ("succeeded", 725_000, "RUB", "canceled"),
         ("pending", 700_000, "RUB", "succeeded"),
         ("pending", 725_000, "USD", "unknown"),
+        ("pending", 725_000, None, "unknown"),
     ],
 )
 def test_reconcile_create_and_get_disagreements(settings, created_status, created_amount, checked_currency, expected):
@@ -244,6 +245,8 @@ def test_reconcile_create_and_get_disagreements(settings, created_status, create
         def get(self, external_id):
             self.reads += 1
             assert external_id == "provider-1"
+            if checked_currency is None:
+                raise InvalidPaymentResponse()
             return Payment(
                 id=external_id, status="canceled" if expected == "canceled" else "succeeded",
                 amount=ProviderAmount(value="7250.00", currency=checked_currency),
