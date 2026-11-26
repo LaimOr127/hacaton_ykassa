@@ -1,0 +1,36 @@
+name: Order application
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  checkout-flow:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m ruff check app tests
+      - run: node --check app/static/order.js
+      - run: python -m pytest -q
+      - name: Build, start and exercise Compose
+        run: |
+          docker compose up --build -d --wait app
+          python tests/compose_flow.py
+          docker compose restart app
+          docker compose up -d --wait app
+          python tests/compose_flow.py --verify
+      - name: Show container logs
+        if: failure()
+        run: docker compose logs app
+      - name: Stop containers
+        if: always()
+        run: docker compose down

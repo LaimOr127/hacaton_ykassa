@@ -1,14 +1,14 @@
 openapi: 3.1.0
 info:
   title: Заказ из переписки
-  version: 0.1.0-draft
+  version: 0.1.0
   description: |
-    Проект HTTP API приложения. Примеры содержат вымышленные данные.
+    HTTP API покупателя первого этапа. Примеры содержат вымышленные данные.
     Действия ЮKassa выполняются на сервере через MCP.
     Все ответы с данными сессии или заказа используют Cache-Control no-store.
 servers:
   - url: /api/v1
-    description: Планируемый префикс API приложения
+    description: Префикс API приложения
 tags:
   - name: Orders
     description: Черновик заказа и переписка
@@ -61,10 +61,9 @@ paths:
       tags: [Orders]
       operationId: getOrder
       summary: Прочитать текущую карточку
-      description: Доступна сессии покупателя, создавшей заказ, и сотруднику его магазина.
+      description: Доступна сессии покупателя, создавшей заказ.
       security:
         - CustomerSession: []
-        - MerchantSession: []
       responses:
         '200':
           description: Текущее состояние заказа
@@ -181,6 +180,11 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
+        '429':
+          description: Исчерпан лимит обращений к модели.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
         '503':
           description: Результат обработки пока недоступен. Повторить с тем же client_message_id и телом.
           content:
@@ -272,7 +276,6 @@ paths:
         Пока результат unknown, клиент читает этот ресурс и ждёт сверки.
       security:
         - CustomerSession: []
-        - MerchantSession: []
       responses:
         '200':
           description: Сохранённое состояние платёжной попытки
@@ -300,11 +303,6 @@ components:
       in: cookie
       name: __Host-customer_session
       description: Непрозрачный идентификатор серверной сессии покупателя. Привязан к магазину и заказам этой сессии.
-    MerchantSession:
-      type: apiKey
-      in: cookie
-      name: __Host-merchant_session
-      description: Непрозрачный идентификатор серверной сессии сотрудника. Доступ ограничен его магазином.
     CsrfToken:
       type: apiKey
       in: header
