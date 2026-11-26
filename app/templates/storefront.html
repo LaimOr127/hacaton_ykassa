@@ -8,9 +8,9 @@
     <link rel="stylesheet" href="/static/order.css">
     <script src="/static/order.js" defer></script>
   </head>
-  <body data-mode="{{ mode }}" data-order="{{ order.id if order else '' }}">
+  <body data-mode="{{ mode }}" data-shop="{{ slug }}" data-order="{{ order.id if order else '' }}">
     <header class="masthead">
-      <a href="/" class="brand">{{ title }}</a>
+      <a href="/s/{{ slug }}" class="brand">{{ title }}</a>
       {% if mode == "simulated" %}<span class="mode">Симуляция оплаты</span>{% endif %}
     </header>
     <main>
@@ -19,14 +19,16 @@
         <section class="conversation" aria-labelledby="chat-title">
           <h2 id="chat-title">Переписка</h2>
           <div id="messages" class="messages" role="log" aria-label="Сообщения">
-            <p class="message agent">Здравствуйте! Напишите, сколько завтраков нужно и сколько из них вегетарианских.</p>
+            <p class="message agent">Здравствуйте! Опишите, что хотите заказать. Я уточню детали и покажу сумму.</p>
             {% for text, reply in transcript %}
               <p class="message customer">{{ text }}</p>
               <p class="message agent">{{ reply }}</p>
             {% endfor %}
           </div>
-          {% if not transcript %}
-            <button type="button" id="sample" class="sample">Попробовать: 20 завтраков, из них 5 вегетарианских</button>
+          {% if not transcript and coffee_example %}
+            <button type="button" id="sample" class="sample" data-message="20 завтраков, из них 5 вегетарианских">Попробовать заказать 20 завтраков</button>
+          {% elif not transcript and cleaning_example %}
+            <button type="button" id="sample" class="sample" data-message="Нужна уборка квартиры 58 м² и чистка духовки.">Попробовать заказать уборку 58 м²</button>
           {% endif %}
           <form id="chat">
             <label for="text">Ваше сообщение</label>

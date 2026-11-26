@@ -5,6 +5,18 @@ from pathlib import Path
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS merchants (
+    slug TEXT PRIMARY KEY, name TEXT NOT NULL, owner_hash TEXT NOT NULL,
+    catalog_json TEXT, deposit INTEGER NOT NULL DEFAULT 100, catalog_version INTEGER NOT NULL DEFAULT 0,
+    mcp_ciphertext TEXT, mcp_fingerprint TEXT UNIQUE
+);
+CREATE TABLE IF NOT EXISTS merchant_sessions (
+    id TEXT PRIMARY KEY, merchant TEXT NOT NULL REFERENCES merchants(slug), expires_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS auth_attempts (
+    address TEXT NOT NULL, attempted_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS auth_attempts_time ON auth_attempts(attempted_at);
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY, merchant TEXT NOT NULL, expires_at INTEGER NOT NULL
 );
@@ -15,6 +27,7 @@ CREATE TABLE IF NOT EXISTS orders (
     quote TEXT NOT NULL, agreed_version INTEGER, attempt_id TEXT,
     UNIQUE (session_id, create_key)
 );
+CREATE INDEX IF NOT EXISTS merchant_orders ON orders(merchant, state);
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY, order_id TEXT NOT NULL REFERENCES orders(id),
     request_key TEXT NOT NULL, base_version INTEGER NOT NULL, text TEXT NOT NULL,

@@ -5,6 +5,22 @@ from dataclasses import dataclass
 class Product:
     title: str
     unit_kopecks: int
+    basis: str = "unit"
+    tiers: tuple[tuple[int, int, int], ...] = ()
+
+    def item(self, sku: str, value: int) -> dict:
+        title, quantity, price = self.title, value, self.unit_kopecks
+        if self.basis == "fixed" and value != 1:
+            raise ValueError(f"Позицию «{title}» можно добавить один раз.")
+        if self.basis == "area":
+            price = next((amount for lower, upper, amount in self.tiers if lower <= value <= upper), None)
+            if price is None:
+                raise ValueError(f"В прайсе нет тарифа для площади {value} м².")
+            title, quantity = f"{title} · {value} м²", 1
+        return {
+            "sku": sku, "title": title, "quantity": quantity,
+            "unit_kopecks": price, "amount_kopecks": quantity * price,
+        }
 
 
 @dataclass(frozen=True)
@@ -15,16 +31,7 @@ class Catalog:
     deposit_percent: int = 100
 
     def price(self, quantities: dict[str, int]) -> dict:
-        items = [
-            {
-                "sku": sku,
-                "title": self.products[sku].title,
-                "quantity": quantity,
-                "unit_kopecks": self.products[sku].unit_kopecks,
-                "amount_kopecks": quantity * self.products[sku].unit_kopecks,
-            }
-            for sku, quantity in quantities.items()
-        ]
+        items = [self.products[sku].item(sku, value) for sku, value in quantities.items()]
         total = sum(item["amount_kopecks"] for item in items)
         payable = (total * self.deposit_percent + 50) // 100
         return {

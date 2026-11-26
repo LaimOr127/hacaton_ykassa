@@ -11,6 +11,9 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
       LLM_MODEL: ${LLM_MODEL:-gpt-4.1-mini}
+      MERCHANT_SETUP_KEY: ${MERCHANT_SETUP_KEY:-}
+      MERCHANT_VAULT_KEY: ${MERCHANT_VAULT_KEY:-}
+      COFFEE_OWNER_CODE: ${COFFEE_OWNER_CODE:-}
     volumes:
       - order_data:/data
     security_opt:

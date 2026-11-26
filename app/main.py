@@ -1,5 +1,3 @@
-import hashlib
-import hmac
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -19,8 +17,11 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .agent import DemoAgent, ModelAgent
 from .catalog import COFFEE, Catalog
 from .gateway import Simulator, YooKassa
+from .merchant_views import merchant_routes
+from .merchants import Merchants
 from .orders import OrderError, Orders
 from .payments import Payments
+from .session_security import SESSION_TOKEN, check_csrf, csrf, digest
 from .settings import Settings
 from .storage import Store
 
@@ -40,23 +41,22 @@ class Message(Confirm):
     text: Annotated[str, StringConstraints(min_length=1, max_length=4000)]
 
 
-def digest(value: str) -> str:
-    return hashlib.sha256(value.encode()).hexdigest()
-
-
-def csrf(token: str) -> str:
-    return digest("csrf:" + token)
-
-
 def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, agent=None, gateway=None):
     settings = settings or Settings.from_env()
     store = Store(settings.db_path, settings.mode)
+    merchants = Merchants(store, settings, catalog)
     agent = agent if agent is not None else (DemoAgent() if settings.mode == "simulated" else ModelAgent(settings))
-    gateway = gateway if gateway is not None else (
-        Simulator(store) if settings.mode == "simulated" else YooKassa(settings.mcp_token)
-    )
-    orders = Orders(store, catalog, agent)
-    payments = Payments(store, catalog, gateway)
+    if gateway is None and settings.mode == "simulated":
+        gateway = Simulator(store)
+
+    def gateway_for(slug):
+        if gateway is not None:
+            return gateway
+        token = merchants.token(slug)
+        return YooKassa(token) if token else None
+
+    orders = Orders(store, merchants.catalog, agent)
+    payments = Payments(store, merchants.catalog, gateway_for)
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -72,6 +72,7 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
         www_redirect=False,
     )
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
+    app.include_router(merchant_routes(merchants, TEMPLATES), include_in_schema=False)
 
     @app.middleware("http")
     async def security_headers(request, call_next):
@@ -79,7 +80,8 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
             length = request.headers.get("content-length", "")
             if not length.isascii() or not length.isdecimal():
                 return JSONResponse({"code": "length_required", "message": "Укажите размер запроса."}, status_code=411)
-            if len(length) > 5 or int(length) > 20_000:
+            limit = 80_000 if request.url.path == "/merchant/catalog" else 20_000
+            if len(length) > 5 or int(length) > limit:
                 return JSONResponse({"code": "request_too_large", "message": "Запрос слишком длинный."}, status_code=413)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
@@ -88,7 +90,7 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
             "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
         )
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Referrer-Policy"] = "same-origin"
         return response
 
     @app.exception_handler(OrderError)
@@ -99,23 +101,28 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
     async def validation_error(_request, _error):
         return JSONResponse({"code": "invalid_request", "message": "Проверьте данные запроса."}, status_code=400)
 
-    def session(request, *, write=False):
-        token = request.cookies.get(settings.cookie, "")
-        if len(token) != 43 or not token.isascii():
+    def session_id(token, slug):
+        return digest(token if slug == catalog.merchant_id else f"{slug}:{token}")
+
+    def customer_cookie(slug):
+        return settings.cookie if slug == catalog.merchant_id else f"{settings.cookie}-{slug}"
+
+    def session(request, *, write=False, slug=None):
+        slug = slug or request.headers.get("X-Shop", catalog.merchant_id)
+        if len(slug) > 32:
+            raise OrderError(401, "session_required", "Откройте страницу магазина заново.")
+        token = request.cookies.get(customer_cookie(slug), "")
+        if not SESSION_TOKEN.fullmatch(token):
             raise OrderError(401, "session_required", "Откройте страницу магазина заново.")
         with store.read() as db:
             row = db.execute(
                 "SELECT * FROM sessions WHERE id = ? AND merchant = ? AND expires_at > ?",
-                (digest(token), catalog.merchant_id, int(time.time())),
+                (session_id(token, slug), slug, int(time.time())),
             ).fetchone()
         if row is None:
             raise OrderError(401, "session_required", "Откройте страницу магазина заново.")
         if write:
-            submitted = request.headers.get("X-CSRF-Token", "")
-            if request.headers.get("Origin") != settings.origin or not hmac.compare_digest(
-                submitted.encode(), csrf(token).encode()
-            ):
-                raise OrderError(403, "invalid_origin", "Обновите страницу и повторите действие.")
+            check_csrf(request, settings.origin, token, request.headers.get("X-CSRF-Token", ""))
         return row
 
     @app.get("/healthz")
@@ -125,25 +132,34 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
         return {"status": "ok"}
 
     @app.get("/")
-    def storefront(request: Request):
+    def default_storefront(request: Request):
+        return storefront(request, catalog.merchant_id)
+
+    @app.get("/s/{slug}")
+    def storefront(request: Request, slug: str):
+        with store.read() as db:
+            view_catalog = merchants.catalog(db, slug)
+            if view_catalog is None:
+                raise OrderError(404, "shop_not_found", "Магазин ещё не опубликовал витрину.")
+        cookie_name = customer_cookie(slug)
+        token = request.cookies.get(cookie_name, "")
         try:
-            row = session(request)
+            row = session(request, slug=slug)
         except OrderError:
             token = secrets.token_urlsafe(32)
             with store.transaction() as db:
                 db.execute(
                     "INSERT INTO sessions VALUES (?, ?, ?)",
-                    (digest(token), catalog.merchant_id, int(time.time()) + STALE_AFTER),
+                    (session_id(token, slug), slug, int(time.time()) + STALE_AFTER),
                 )
             current = None
             transcript = []
             new_session = True
         else:
-            token = request.cookies[settings.cookie]
             with store.read() as db:
                 latest = db.execute(
                     "SELECT id FROM orders WHERE session_id = ? AND merchant = ? ORDER BY rowid DESC LIMIT 1",
-                    (row["id"], catalog.merchant_id),
+                    (row["id"], slug),
                 ).fetchone()
             current = orders.get(row, latest["id"]) if latest else None
             transcript = orders.transcript(row, latest["id"]) if latest else []
@@ -152,13 +168,16 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
             request,
             "storefront.html",
             {
-                "title": catalog.title, "csrf": csrf(token), "mode": settings.mode,
+                "title": view_catalog.title, "csrf": csrf(token), "mode": settings.mode, "slug": slug,
+                "coffee_example": slug == "coffee" and {"breakfast", "vegetarian"} <= view_catalog.products.keys(),
+                "cleaning_example": {item.basis for item in view_catalog.products.values()} >= {"area", "fixed"}
+                and {"cleaning", "oven"} <= view_catalog.products.keys(),
                 "order": current, "transcript": transcript,
             },
         )
         if new_session:
             response.set_cookie(
-                settings.cookie, token, max_age=STALE_AFTER, httponly=True, secure=settings.secure, samesite="lax",
+                cookie_name, token, max_age=STALE_AFTER, httponly=True, secure=settings.secure, samesite="lax",
             )
         return response
 

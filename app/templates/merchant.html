@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ name }} · Кабинет продавца</title>
+  <link rel="stylesheet" href="/static/order.css">
+  <link rel="stylesheet" href="/static/merchant.css">
+  <script src="/static/merchant.js" defer></script>
+</head>
+<body class="merchant">
+  <header class="masthead">
+    <a class="brand" href="/merchant">Заказ из переписки</a>
+    <form class="inline" method="post" action="/merchant/logout">
+      <input type="hidden" name="token" value="{{ csrf }}"><button class="secondary">Выйти</button>
+    </form>
+  </header>
+  <main>
+    <div class="merchant-heading">
+      <div>
+        <p class="hint">Кабинет продавца</p>
+        <h1>{{ name }}</h1>
+      </div>
+      {% if catalog_ready %}<a href="/s/{{ slug }}" class="button">Открыть витрину</a>{% endif %}
+    </div>
+    <nav class="section-nav" aria-label="Разделы кабинета">
+      <a href="#orders">Заказы</a><a href="#catalog">Прайс и предоплата</a><a href="#connection">Оплата</a>
+    </nav>
+    {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+    {% if notice %}<p class="notice" role="status">{{ notice }}</p>{% endif %}
+    <div class="merchant-layout">
+      <section class="workspace-panel orders-panel" id="orders" aria-labelledby="orders-heading">
+        <div class="panel-heading"><h2 id="orders-heading">Последние заказы</h2><span class="hint">С оплатой: {{ paid_count }}</span></div>
+        {% if orders %}
+          <table>
+            <thead><tr><th scope="col">Заказ</th><th scope="col">Сумма</th><th scope="col">Статус</th></tr></thead>
+            <tbody>
+              {% for order in orders %}
+              <tr>
+                <th scope="row">#{{ order.id }}</th>
+                <td class="money">{{ '%.2f'|format(order.total / 100) }} ₽</td>
+                <td><span class="pill {{ order.status_class }}">{{ order.state }}</span></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <p>Заказов пока нет. {% if catalog_ready %}Проверьте витрину как покупатель.{% else %}Загрузите прайс, чтобы открыть витрину.{% endif %}</p>
+        {% endif %}
+      </section>
+      <section class="workspace-panel connection-panel" id="connection" aria-labelledby="connection-heading">
+        <h2 id="connection-heading">Оплата</h2>
+        {% if mode == 'simulated' %}
+          <p class="pill">Симуляция</p><p>В этом режиме можно пройти оформление и подтвердить демонстрационную оплату.</p>
+        {% elif connected %}
+          <p class="pill paid">Токен сохранён</p><p>Создайте пробный заказ, чтобы проверить прохождение оплаты.</p>
+        {% elif not vault_ready %}
+          <p>Администратору сервера нужно настроить хранилище токенов.</p>
+        {% else %}
+          <p>Используйте MCP-токен тестового магазина ЮKassa.</p>
+          <form method="post" action="/merchant/connection">
+            <input type="hidden" name="token" value="{{ csrf }}">
+            <label for="mcp-token">MCP-токен</label>
+            <input id="mcp-token" type="password" name="mcp_token" required maxlength="4096" autocomplete="off">
+            <button>Проверить и сохранить токен</button>
+          </form>
+        {% endif %}
+      </section>
+      <section class="workspace-panel catalog-panel" id="catalog" aria-labelledby="catalog-heading">
+        <div class="panel-heading"><h2 id="catalog-heading">Прайс и предоплата</h2><span class="hint">Позиций: {{ products|length }}</span></div>
+        {% if products %}
+          <details>
+            <summary>Опубликованные позиции</summary>
+            <ul class="catalog-list">{% for product in products %}<li>{{ product.title }} <span class="hint">{{ product.basis }}</span></li>{% endfor %}</ul>
+          </details>
+        {% endif %}
+        <p>В CSV укажите цену в копейках. Для тарифа по площади добавьте строку на каждый диапазон.</p>
+        <div class="catalog-tools">
+          <label for="catalog-file">Импорт CSV</label><input id="catalog-file" type="file" accept=".csv,text/csv">
+          <a href="/merchant/example.csv" download>Скачать пример клининга</a>
+        </div>
+        <p id="import-status" role="status" class="hint"></p>
+        <form method="post" action="/merchant/catalog">
+          <input type="hidden" name="token" value="{{ csrf }}">
+          <input type="hidden" name="catalog_version" value="{{ catalog_version }}">
+          <label for="catalog-csv">Содержимое CSV</label>
+          <textarea id="catalog-csv" name="catalog_csv" rows="7" maxlength="12000" required
+            spellcheck="false">{{ catalog_csv }}</textarea>
+          <label for="deposit">Предоплата, %</label>
+          <input id="deposit" name="deposit" type="number" min="1" max="100" step="1" inputmode="numeric" required value="{{ deposit }}">
+          <button>Опубликовать прайс</button>
+        </form>
+      </section>
+    </div>
+  </main>
+</body>
+</html>

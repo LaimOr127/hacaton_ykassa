@@ -17,7 +17,7 @@ let lastDelta = "";
 const api = "/api/v1/orders";
 
 async function request(path, options = {}) {
-  const headers = {"X-CSRF-Token": csrf, ...options.headers};
+  const headers = {"X-CSRF-Token": csrf, "X-Shop": document.body.dataset.shop, ...options.headers};
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
   const response = await fetch(path, {...options, headers, signal: AbortSignal.timeout(45000)});
   const body = await response.json();
@@ -166,7 +166,7 @@ byId("chat").addEventListener("submit", (event) => {
 });
 
 byId("sample")?.addEventListener("click", () => {
-  byId("text").value = "20 завтраков, из них 5 вегетарианских";
+  byId("text").value = byId("sample").dataset.message;
   byId("text").focus();
 });
 
@@ -192,7 +192,7 @@ byId("new-order").addEventListener("click", () => run(async () => {
   lastDelta = "";
   lastMessage = undefined;
   byId("messages").replaceChildren();
-  addMessage("agent", "Напишите, сколько завтраков нужно и сколько из них вегетарианских.");
+  addMessage("agent", "Опишите, что хотите заказать.");
 }));
 
 const orderId = document.body.dataset.order;

@@ -59,6 +59,7 @@ def test_mcp_sdk_calls_official_payment_tools(monkeypatch):
 
     monkeypatch.setattr(gateway, "streamable_http_client", local_transport)
     provider = gateway.YooKassa("test-token-placeholder")
+    assert provider.check() is True
     payment = provider.create(735_000, "attempt-123")
     assert payment.status == "pending"
     assert payment.kopecks == 735_000
