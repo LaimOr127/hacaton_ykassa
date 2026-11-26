@@ -1,0 +1,541 @@
+openapi: 3.1.0
+info:
+  title: Заказ из переписки
+  version: 0.1.0-draft
+  description: |
+    Проект HTTP API приложения. Примеры содержат вымышленные данные.
+    Действия ЮKassa выполняются на сервере через MCP.
+    Все ответы с данными сессии или заказа используют Cache-Control no-store.
+servers:
+  - url: /api/v1
+    description: Планируемый префикс API приложения
+tags:
+  - name: Orders
+    description: Черновик заказа и переписка
+  - name: Payments
+    description: Подтверждение версии и платёжные попытки
+paths:
+  /orders:
+    post:
+      tags: [Orders]
+      operationId: createOrder
+      summary: Создать пустой черновик
+      description: |
+        Магазин определяется по сессии покупателя, выданной для витрины магазина.
+        У черновика версия 1 и нулевые суммы. Повтор возвращает исходный ответ 201.
+      security:
+        - CustomerSession: []
+          CsrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '201':
+          description: Черновик сохранён
+          headers:
+            Location:
+              required: true
+              schema: {type: string, format: uri-reference}
+              example: /api/v1/orders/ord_coffee
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Order'}
+              example:
+                id: ord_coffee
+                version: 1
+                status: draft
+                agreed_version: null
+                items: []
+                total_kopecks: 0
+                payable_kopecks: 0
+                balance_kopecks: 0
+                currency: RUB
+                payment_attempt_id: null
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /orders/{orderId}:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    get:
+      tags: [Orders]
+      operationId: getOrder
+      summary: Прочитать текущую карточку
+      description: Доступна сессии покупателя, создавшей заказ, и сотруднику его магазина.
+      security:
+        - CustomerSession: []
+        - MerchantSession: []
+      responses:
+        '200':
+          description: Текущее состояние заказа
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Order'}
+              examples:
+                coffee:
+                  summary: Кофейня до замены двух завтраков, 7 250 ₽
+                  value:
+                    id: ord_coffee
+                    version: 2
+                    status: draft
+                    agreed_version: null
+                    items:
+                      - {sku: breakfast, title: Обычный завтрак, quantity: 15, unit_kopecks: 35000, amount_kopecks: 525000}
+                      - {sku: vegetarian, title: Вегетарианский завтрак, quantity: 5, unit_kopecks: 40000, amount_kopecks: 200000}
+                    total_kopecks: 725000
+                    payable_kopecks: 725000
+                    balance_kopecks: 0
+                    currency: RUB
+                    payment_attempt_id: null
+                cleaning: {$ref: '#/components/examples/CleaningOrder'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /orders/{orderId}/messages:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    post:
+      tags: [Orders]
+      operationId: submitMessage
+      summary: Принять сообщение покупателя
+      description: |
+        Приложение проверяет предложение агента по каталогу и применяет пакет правок
+        атомарно, если версия ещё актуальна. Успешная правка повышает версию.
+        Уточнение или передача сотруднику сохраняют версию, если состав не менялся.
+        Пока платёж активен или заказ уже оплачен полностью либо частично,
+        правки блокируются.
+        Ключ дедупликации — сессия покупателя, заказ и client_message_id.
+        Тот же ключ с теми же text и order_version возвращает сохранённый ответ 200.
+        Изменение любого поля при том же ключе даёт 409 idempotency_conflict.
+        Устаревшая версия даёт 409 stale_version без применения правки.
+      security:
+        - CustomerSession: []
+          CsrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [client_message_id, order_version, text]
+              properties:
+                client_message_id: {$ref: '#/components/schemas/ReplayKey'}
+                order_version: {$ref: '#/components/schemas/Version'}
+                text: {type: string, minLength: 1, maxLength: 4000}
+            examples:
+              coffee:
+                summary: Кофейня, замена двух завтраков
+                value:
+                  client_message_id: 407ac7a9-70e8-4117-88c2-253534ef820f
+                  order_version: 2
+                  text: Замените два обычных завтрака на вегетарианские.
+              cleaning:
+                summary: Клининг, уборка и духовка
+                value:
+                  client_message_id: 24e3f0fd-67e3-479f-885e-8c4b6377416b
+                  order_version: 1
+                  text: Нужна уборка квартиры 58 м² и чистка духовки.
+      responses:
+        '200':
+          description: Сохранённый результат обработки сообщения
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MessageResult'}
+              examples:
+                coffee:
+                  value:
+                    message_id: msg_coffee
+                    outcome: order_updated
+                    reply: Заменили два завтрака. Теперь 13 обычных и 7 вегетарианских.
+                    order:
+                      id: ord_coffee
+                      version: 3
+                      status: draft
+                      agreed_version: null
+                      items:
+                        - {sku: breakfast, title: Обычный завтрак, quantity: 13, unit_kopecks: 35000, amount_kopecks: 455000}
+                        - {sku: vegetarian, title: Вегетарианский завтрак, quantity: 7, unit_kopecks: 40000, amount_kopecks: 280000}
+                      total_kopecks: 735000
+                      payable_kopecks: 735000
+                      balance_kopecks: 0
+                      currency: RUB
+                      payment_attempt_id: null
+                clarification:
+                  value:
+                    message_id: msg_clarification
+                    outcome: clarification
+                    reply: Какая площадь квартиры?
+                    order:
+                      id: ord_cleaning
+                      version: 1
+                      status: draft
+                      agreed_version: null
+                      items: []
+                      total_kopecks: 0
+                      payable_kopecks: 0
+                      balance_kopecks: 0
+                      currency: RUB
+                      payment_attempt_id: null
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503':
+          description: Результат обработки пока недоступен. Повторить с тем же client_message_id и телом.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+  /orders/{orderId}/payment-attempts:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    post:
+      tags: [Payments]
+      operationId: createPaymentAttempt
+      summary: Подтвердить версию и зарегистрировать платёжную попытку
+      description: |
+        Вызов означает явное согласие покупателя с показанной версией.
+        Для пустого заказа, нулевого платежа или уже завершённой оплаты
+        возвращается 409 order_not_payable.
+        Сервер проверяет актуальность цены и заказа. Если цены изменились, сервер
+        обновляет карточку, возвращает 409 stale_version и ждёт нового согласия.
+        Сумма берётся из payable_kopecks сохранённого снимка, который фиксируется
+        атомарно с попыткой. Попытка сохраняется до вызова MCP.
+        Повтор с тем же ключом и телом возвращает ту же попытку в её текущем состоянии.
+        Для незавершённой попытки с другим ключом возвращается 409 payment_in_progress.
+        При подтверждённом отказе или отмене новую попытку создают новым ключом.
+      security:
+        - CustomerSession: []
+          CsrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [order_version]
+              properties:
+                order_version: {$ref: '#/components/schemas/Version'}
+            examples:
+              coffee:
+                summary: Кофейня, подтверждение 7 350 ₽
+                value: {order_version: 3}
+              cleaning:
+                summary: Клининг, подтверждение предоплаты 1 590 ₽
+                value: {order_version: 2}
+      responses:
+        '201':
+          description: Попытка сохранена. Статус оплаты доступен по Location.
+          headers:
+            Location: {$ref: '#/components/headers/AttemptLocation'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PaymentAttempt'}
+              example:
+                id: att_coffee
+                order_id: ord_coffee
+                order_version: 3
+                status: creating
+                amount_kopecks: 735000
+                currency: RUB
+        '200':
+          description: Существующая попытка для того же запроса
+          headers:
+            Location: {$ref: '#/components/headers/AttemptLocation'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PaymentAttempt'}
+              examples:
+                unknown: {$ref: '#/components/examples/UnknownAttempt'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /orders/{orderId}/payment-attempts/{attemptId}:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+      - name: attemptId
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/ResourceId'}
+    get:
+      tags: [Payments]
+      operationId: getPaymentAttempt
+      summary: Прочитать состояние попытки
+      description: |
+        Возвращает последнее сохранённое состояние. Сверка выполняется на сервере.
+        Ссылка оплаты доступна только сессии покупателя, владеющей заказом.
+        Пока результат unknown, клиент читает этот ресурс и ждёт сверки.
+      security:
+        - CustomerSession: []
+        - MerchantSession: []
+      responses:
+        '200':
+          description: Сохранённое состояние платёжной попытки
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PaymentAttempt'}
+              examples:
+                awaiting_payment: {$ref: '#/components/examples/CoffeeAttempt'}
+                unknown: {$ref: '#/components/examples/UnknownAttempt'}
+                deposit_received:
+                  summary: Предоплата клининга подтверждена
+                  value:
+                    id: att_cleaning
+                    order_id: ord_cleaning
+                    order_version: 2
+                    status: succeeded
+                    amount_kopecks: 159000
+                    currency: RUB
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+components:
+  securitySchemes:
+    CustomerSession:
+      type: apiKey
+      in: cookie
+      name: __Host-customer_session
+      description: Непрозрачный идентификатор серверной сессии покупателя. Привязан к магазину и заказам этой сессии.
+    MerchantSession:
+      type: apiKey
+      in: cookie
+      name: __Host-merchant_session
+      description: Непрозрачный идентификатор серверной сессии сотрудника. Доступ ограничен его магазином.
+    CsrfToken:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+      description: Токен из HTML приложения. Сервер проверяет его привязку к выбранной сессии и точное совпадение Origin.
+  parameters:
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/ResourceId'}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Новый ключ на намеренное действие. После обрыва повторяется тот же ключ с
+        тем же телом. Область ключа — сессия, метод и конкретный путь запроса.
+        Тот же ключ с изменённым телом даёт 409 idempotency_conflict.
+      schema: {$ref: '#/components/schemas/ReplayKey'}
+  headers:
+    AttemptLocation:
+      required: true
+      schema: {type: string, format: uri-reference}
+      example: /api/v1/orders/ord_coffee/payment-attempts/att_coffee
+  responses:
+    BadRequest:
+      description: Неверный запрос или отсутствует обязательное поле либо ключ повтора
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Unauthorized:
+      description: Ожидаемая ролью сессия отсутствует, недействительна или истекла
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Forbidden:
+      description: У действительной сессии покупателя отсутствует верная CSRF-пара
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    NotFound:
+      description: Ресурс отсутствует или недоступен для текущей сессии и магазина
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Conflict:
+      description: |
+        Код stale_version требует перечитать заказ и подтвердить изменения явно.
+        При request_in_progress следует повторить тот же запрос с тем же ключом.
+        При payment_in_progress следует перечитать заказ и опрашивать активную попытку.
+        order_not_payable и order_locked указывают на текущее состояние заказа.
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - type: object
+                required: [code, message, current_version]
+                additionalProperties: false
+                properties:
+                  code: {const: stale_version}
+                  message: {type: string}
+                  current_version: {$ref: '#/components/schemas/Version'}
+              - type: object
+                required: [code, message]
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                    enum: [idempotency_conflict, request_in_progress, payment_in_progress, order_not_payable, order_locked]
+                  message: {type: string}
+          examples:
+            stale_version:
+              value:
+                code: stale_version
+                message: Состав или цена изменились. Перечитайте карточку заказа.
+                current_version: 3
+            idempotency_conflict:
+              value:
+                code: idempotency_conflict
+                message: Этот ключ уже использован для другого запроса.
+            payment_in_progress:
+              value:
+                code: payment_in_progress
+                message: Дождитесь результата уже созданной попытки.
+  schemas:
+    ResourceId:
+      type: string
+      minLength: 1
+      maxLength: 128
+      pattern: '^[A-Za-z0-9_-]+$'
+      description: Непрозрачный публичный идентификатор приложения.
+    ReplayKey:
+      type: string
+      format: uuid
+      description: Случайный UUID, выбранный клиентом.
+    Version:
+      type: integer
+      minimum: 1
+      maximum: 9007199254740991
+      description: Версия состава, условий и цены. Версия API задаётся отдельно префиксом пути.
+    Kopecks:
+      type: integer
+      minimum: 0
+      maximum: 9007199254740991
+      description: Целое число копеек без потери точности в JavaScript.
+    Order:
+      type: object
+      required: [id, version, status, agreed_version, items, total_kopecks, payable_kopecks, balance_kopecks, currency, payment_attempt_id]
+      properties:
+        id: {$ref: '#/components/schemas/ResourceId'}
+        version: {$ref: '#/components/schemas/Version'}
+        status:
+          type: string
+          enum: [draft, agreed, payment_pending, paid, deposit_received]
+          description: |
+            agreed означает подтверждённую текущую версию без активной попытки после
+            окончательной отмены или отказа. deposit_received означает успешную оплату
+            только предоплаты за текущую версию.
+        agreed_version:
+          description: Подтверждённая текущая версия. null, пока текущая карточка не подтверждена.
+          anyOf:
+            - {$ref: '#/components/schemas/Version'}
+            - {type: 'null'}
+        items:
+          type: array
+          items:
+            type: object
+            required: [sku, title, quantity, unit_kopecks, amount_kopecks]
+            properties:
+              sku: {type: string, minLength: 1}
+              title: {type: string, minLength: 1}
+              quantity: {type: integer, minimum: 1, maximum: 9007199254740991}
+              unit_kopecks: {$ref: '#/components/schemas/Kopecks'}
+              amount_kopecks: {$ref: '#/components/schemas/Kopecks'}
+        total_kopecks:
+          $ref: '#/components/schemas/Kopecks'
+          description: Полная сумма по серверному снимку расчёта.
+        payable_kopecks:
+          $ref: '#/components/schemas/Kopecks'
+          description: Сумма текущего платежа. Для предоплаты округляется до копейки, половина вверх.
+        balance_kopecks:
+          $ref: '#/components/schemas/Kopecks'
+          description: Полная сумма за вычетом предусмотренного платежа, независимо от статуса попытки.
+        currency: {type: string, const: RUB}
+        payment_attempt_id:
+          description: Последняя попытка для текущей версии. null, пока её нет.
+          anyOf:
+            - {$ref: '#/components/schemas/ResourceId'}
+            - {type: 'null'}
+    MessageResult:
+      type: object
+      required: [message_id, outcome, reply, order]
+      properties:
+        message_id: {$ref: '#/components/schemas/ResourceId'}
+        outcome: {type: string, enum: [order_updated, clarification, handoff]}
+        reply:
+          type: string
+          description: Текст ответа покупателю, отображаемый как обычный текст.
+        order: {$ref: '#/components/schemas/Order'}
+    PaymentAttempt:
+      type: object
+      additionalProperties: false
+      required: [id, order_id, order_version, amount_kopecks, currency, status]
+      properties:
+        id: {$ref: '#/components/schemas/ResourceId'}
+        order_id: {$ref: '#/components/schemas/ResourceId'}
+        order_version: {$ref: '#/components/schemas/Version'}
+        amount_kopecks:
+          $ref: '#/components/schemas/Kopecks'
+          minimum: 1
+        currency: {type: string, const: RUB}
+        status:
+          type: string
+          enum: [creating, pending, unknown, succeeded, canceled, failed]
+          description: |
+            creating — запись создана, результат вызова ещё не сохранён.
+            pending — платёж известен и ожидает завершения.
+            unknown — нужна сверка, новая попытка заблокирована.
+            succeeded и canceled — подтверждённые конечные статусы.
+            failed — подтверждён отказ создания без внешнего платежа.
+        confirmation_url:
+          type: string
+          format: uri
+          pattern: '^https://'
+          description: Доверенная HTTPS-ссылка, доступная только владельцу заказа при pending. Поле может отсутствовать.
+      if:
+        required: [confirmation_url]
+        properties:
+          confirmation_url: {}
+      then:
+        properties:
+          status: {const: pending}
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: {type: string}
+        message: {type: string}
+  examples:
+    CleaningOrder:
+      summary: Клининг, предоплата 30% получена
+      value:
+        id: ord_cleaning
+        version: 2
+        status: deposit_received
+        agreed_version: 2
+        items:
+          - {sku: cleaning-40-60, title: Уборка 58 м², quantity: 1, unit_kopecks: 450000, amount_kopecks: 450000}
+          - {sku: oven, title: Чистка духовки, quantity: 1, unit_kopecks: 80000, amount_kopecks: 80000}
+        total_kopecks: 530000
+        payable_kopecks: 159000
+        balance_kopecks: 371000
+        currency: RUB
+        payment_attempt_id: att_cleaning
+    CoffeeAttempt:
+      summary: Ссылка на оплату заказа кофейни, пример для покупателя
+      value:
+        id: att_coffee
+        order_id: ord_coffee
+        order_version: 3
+        status: pending
+        amount_kopecks: 735000
+        currency: RUB
+        confirmation_url: https://payments.example.invalid/coffee
+    UnknownAttempt:
+      summary: Исход первой попытки пока не установлен
+      value:
+        id: att_coffee
+        order_id: ord_coffee
+        order_version: 3
+        status: unknown
+        amount_kopecks: 735000
+        currency: RUB

@@ -1,0 +1,7 @@
+extends:
+  - recommended
+rules:
+  info-license: off
+  no-invalid-media-type-examples:
+    severity: error
+    allowAdditionalProperties: true
