@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Заказ #{{ order.id[:8] }} · Кабинет продавца</title>
+  <link rel="stylesheet" href="/static/order.css">
+  <link rel="stylesheet" href="/static/merchant.css">
+</head>
+<body class="merchant">
+  <header class="masthead"><a class="brand" href="/merchant#orders">К списку заказов</a>
+    {% if simulated %}<span class="mode">Симуляция оплаты</span>{% endif %}
+  </header>
+  <main>
+    <div class="merchant-heading"><h1>Заказ #{{ order.id[:8] }}</h1>
+      {% if order.fulfilled %}<span class="pill paid">Исполнен</span>{% endif %}
+    </div>
+    <div class="merchant-layout">
+      <section class="workspace-panel" aria-labelledby="transcript-heading">
+        <h2 id="transcript-heading">Переписка</h2>
+        {% for text, response, seller_reply in transcript %}
+          <p class="operator-message"><strong>Покупатель</strong><br>{{ text }}</p>
+          <p class="operator-message"><strong>Агент</strong><br>{{ response }}</p>
+          {% if seller_reply %}<p class="operator-message"><strong>Ваш ответ</strong><br>{{ seller_reply }}</p>{% endif %}
+        {% else %}<p>Покупатель ещё ничего не написал.</p>{% endfor %}
+        {% if review_id %}
+        <form action="/merchant/orders/{{ order.id }}/reply" method="post">
+          <input type="hidden" name="token" value="{{ csrf }}">
+          <input type="hidden" name="review_id" value="{{ review_id }}">
+          <label for="reply">Ответ покупателю</label>
+          <textarea id="reply" name="reply" rows="3" maxlength="1000" required></textarea>
+          <button>Отправить ответ</button>
+        </form>
+        {% elif order.seller_review %}
+          <p class="operator-message"><strong>Ваш ответ</strong><br>{{ order.seller_review.reply }}</p>
+        {% endif %}
+      </section>
+      <aside class="workspace-panel" aria-labelledby="quote-heading">
+        <h2 id="quote-heading">Состав заказа</h2>
+        <ul class="items">{% for line in order["items"] %}
+          <li><span>{{ line.title }} × {{ line.quantity }}</span>
+            <span class="money">{{ '%.2f'|format(line.amount_kopecks / 100) }} ₽</span></li>
+        {% endfor %}</ul>
+        <p><strong>Итого {{ '%.2f'|format(order.total_kopecks / 100) }} ₽</strong></p>
+        {% if order.status in ["paid", "deposit_received"] %}
+          <p class="pill paid">{{ "Предоплата получена" if order.status == "deposit_received" else "Оплачен" }}</p>
+          {% if order.balance_kopecks %}<p>Остаток {{ '%.2f'|format(order.balance_kopecks / 100) }} ₽</p>{% endif %}
+          {% if not order.fulfilled %}
+          <form action="/merchant/orders/{{ order.id }}/fulfill" method="post">
+            <input type="hidden" name="token" value="{{ csrf }}"><button>Отметить исполненным</button>
+          </form>
+          {% endif %}
+        {% endif %}
+      </aside>
+    </div>
+  </main>
+</body>
+</html>

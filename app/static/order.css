@@ -74,6 +74,10 @@ button:disabled { cursor: wait; opacity: .65; }
 #empty, #deposit { color: var(--muted); }
 #notice { color: var(--error); }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.seller-review {
+  background: var(--reply); padding: 10px 14px; border-inline-start: 3px solid var(--accent);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
 @media (max-width: 720px) {
   main { width: calc(100% - 24px); margin: 24px auto; }
   .masthead, .conversation, .receipt { padding: 14px; }

@@ -46,6 +46,7 @@
 .review-row h3 { margin: 0; font-size: 1.05rem; }
 .review-row code { overflow-wrap: anywhere; }
 .review-row form { max-width: 32rem; }
+.operator-message { padding: 10px 14px; background: var(--reply); white-space: pre-wrap; overflow-wrap: anywhere; }
 
 @media (max-width: 760px) {
   .merchant-layout, .merchant .access-grid { grid-template-columns: 1fr; }

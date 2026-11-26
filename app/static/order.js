@@ -35,7 +35,7 @@ function describePayment() {
   const messages = {
     creating: "Создаём платёж.",
     pending: simulated ? "Готово к симуляции оплаты." : "Ожидаем подтверждения ЮKassa.",
-    succeeded: simulated ? "Симуляция оплаты завершена." : (
+    succeeded: order.fulfilled ? "Заказ исполнен." : simulated ? "Симуляция оплаты завершена." : (
       order.status === "deposit_received" ? "Предоплата получена." : "Оплата подтверждена."
     ),
     canceled: "Оплата отменена. Можно создать новую попытку.",
@@ -47,6 +47,7 @@ function describePayment() {
 
 function render() {
   const locked = ["payment_pending", "paid", "deposit_received"].includes(order?.status);
+  const review = order?.seller_review;
   const items = byId("items");
   items.replaceChildren(...(order?.items ?? []).map((item) => {
     const row = document.createElement("li");
@@ -64,16 +65,21 @@ function render() {
   byId("deposit").textContent = order?.balance_kopecks > 0
     ? `Сейчас ${money(order.payable_kopecks)}, остаток ${money(order.balance_kopecks)}` : "";
   byId("payment-status").textContent = describePayment();
-  byId("text").disabled = locked || busy;
-  byId("send").disabled = locked || busy;
-  byId("pay").hidden = !order?.payable_kopecks || locked;
+  const reviewMessage = review?.status === "pending" ? "Заказ у продавца. Ответ появится здесь."
+    : review?.status === "answered" ? `Ответ продавца\n${review.reply}\nОтправьте уточнённый заказ в чат.` : "";
+  const reviewPanel = byId("seller-review");
+  reviewPanel.hidden = !reviewMessage;
+  if (reviewPanel.textContent !== reviewMessage) reviewPanel.textContent = reviewMessage;
+  byId("text").disabled = locked || busy || review?.status === "pending";
+  byId("send").disabled = locked || busy || review?.status === "pending";
+  byId("pay").hidden = !order?.payable_kopecks || locked || Boolean(review);
   byId("pay").disabled = busy;
   byId("pay").textContent = order?.payable_kopecks
     ? `Подтвердить и оплатить ${money(order.payable_kopecks)}` : "Подтвердить заказ";
   byId("checkout").hidden = !attempt?.confirmation_url;
   if (attempt?.confirmation_url) byId("checkout").href = attempt.confirmation_url;
   else byId("checkout").removeAttribute("href");
-  byId("check-payment").hidden = !["creating", "pending", "unknown"].includes(attempt?.status);
+  byId("check-payment").hidden = !["creating", "pending", "unknown"].includes(attempt?.status) && review?.status !== "pending";
   byId("check-payment").disabled = polling || busy;
   byId("simulate").hidden = !simulated || attempt?.status !== "pending";
   byId("simulate").disabled = busy;
@@ -99,7 +105,9 @@ async function refreshOrder() {
 
 function schedule() {
   clearTimeout(timer);
-  if (["creating", "pending"].includes(attempt?.status)) timer = setTimeout(refreshPayment, 7000);
+  if (["creating", "pending"].includes(attempt?.status) || order?.seller_review?.status === "pending") {
+    timer = setTimeout(refreshPayment, 7000);
+  }
 }
 
 async function run(action) {
@@ -110,7 +118,7 @@ async function run(action) {
   try {
     await action();
   } catch (error) {
-    if (["stale_version", "order_locked", "payment_in_progress"].includes(error?.code) && order) {
+    if (["stale_version", "order_locked", "payment_in_progress", "seller_review_required"].includes(error?.code) && order) {
       try { await refreshOrder(); } catch { /* Сохранённый заказ можно открыть повторно. */ }
     }
     showNotice(error?.code ? error.message : "Связь прервалась. Повторите действие.");
@@ -154,6 +162,9 @@ byId("chat").addEventListener("submit", (event) => {
       lastMessage = {text, order_version: order.version, client_message_id: crypto.randomUUID()};
     }
     const result = await request(`${api}/${order.id}/messages`, {method: "POST", body: JSON.stringify(lastMessage)});
+    if (order.seller_review?.status === "answered" && result.order.seller_review?.status !== "answered") {
+      addMessage("agent", `Продавец\n${order.seller_review.reply}`);
+    }
     order = result.order;
     lastMessage = undefined;
     const difference = order.total_kopecks - previousTotal;

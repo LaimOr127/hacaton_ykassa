@@ -74,6 +74,8 @@ class DemoAgent:
 
     def propose(self, catalog: Catalog, quantities: dict, recent: list, message: str) -> Proposal:
         text = message.casefold().strip().rstrip(".!?")
+        if text == "нужна индивидуальная смета":
+            return Proposal(outcome="handoff", quantities={}, reply="Передаю запрос продавцу.")
         cleaning = re.fullmatch(r"нужна уборка квартиры (\d{1,3})\s*м[²2]( и чистка духовки)?", text)
         if cleaning and "cleaning" in catalog.products:
             area = int(cleaning.group(1))
