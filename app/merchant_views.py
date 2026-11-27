@@ -5,13 +5,15 @@ import secrets
 import time
 from typing import Annotated
 
-from fastapi import APIRouter, Form, Query, Request
+from fastapi import APIRouter, Form, Query, Request, UploadFile
 from fastapi.responses import RedirectResponse, Response
 
+from .checkout import checkout_flags
 from .gateway import YOO_TOOLS, payment_reference
 from .merchants import CLEANING_CSV, export_catalog
 from .model_oauth import finish_authorization, start_authorization
 from .orders import OrderError, public_order, reopen_draft, seller_transcript
+from .payment_documents import PDF_LIMIT, documents_for
 from .session_security import SESSION_TOKEN, check_csrf, csrf, digest
 
 
@@ -93,10 +95,12 @@ def merchant_routes(merchants, templates, payments):
         with store.read() as db:
             owner = db.execute("SELECT name, catalog_version FROM merchants WHERE slug = ?", (slug,)).fetchone()
             catalog = merchants.catalog(db, slug)
+            features = checkout_flags(db, slug)
             rows = db.execute(
-                """SELECT o.id, o.state, o.quote, a.state AS payment_state,
+                """SELECT o.id, o.state, o.quote, a.state AS payment_state, p.paid_parts, p.parts,
                    (r.order_id IS NOT NULL AND r.reply IS NULL) AS needs_reply, f.fulfilled_at
                    FROM orders o LEFT JOIN attempts a ON a.id = o.attempt_id
+                   LEFT JOIN checkout_plans p ON p.order_id = o.id
                    LEFT JOIN seller_reviews r ON r.order_id = o.id AND r.closed_at IS NULL
                    LEFT JOIN fulfilled_orders f ON f.order_id = o.id
                    WHERE o.merchant = ? ORDER BY needs_reply DESC, o.rowid DESC LIMIT 60""",
@@ -118,7 +122,9 @@ def merchant_routes(merchants, templates, payments):
             {
                 "id": row["id"], "short_id": row["id"][:8],
                 "state": "Нужен ответ" if row["needs_reply"] else
-                "Требует сверки" if row["payment_state"] == "unknown" else states[row["state"]],
+                "Требует сверки" if row["payment_state"] == "unknown" else
+                f"Оплачено {row['paid_parts']} из {row['parts']}" if row["paid_parts"] and row["state"] == "payment_pending"
+                else states[row["state"]],
                 "status_class": "review" if row["payment_state"] == "unknown" else row["state"],
                 "total": json.loads(row["quote"])["total_kopecks"],
                 "fulfilled": row["fulfilled_at"] is not None,
@@ -140,6 +146,7 @@ def merchant_routes(merchants, templates, payments):
             "default_model": settings.llm_model,
             "model_providers": {key: value[0] for key, value in merchants.model_providers().items()},
             "mode": settings.mode, "connected": bool(merchants.token(slug)), "vault_ready": merchants.vault is not None,
+            "checkout_features": features, "mail_ready": settings.mail_ready,
             "catalog_ready": catalog is not None,
             "catalog_version": owner["catalog_version"],
             "deposit": draft_deposit if draft_deposit is not None else catalog.deposit_percent if catalog else 100,
@@ -169,6 +176,10 @@ def merchant_routes(merchants, templates, payments):
         with store.read() as db:
             order = public_order(db, merchant_order(db, slug, order_id))
             transcript = seller_transcript(db, order_id)
+            features = checkout_flags(db, slug)
+            payment_list = documents_for(db, order_id) if settings.mode == "live" and (
+                features["receipt_download"] or features["receipt_email"]
+            ) else []
             review = db.execute(
                 "SELECT opened_message FROM seller_reviews WHERE order_id = ? AND closed_at IS NULL AND reply IS NULL",
                 (order_id,),
@@ -176,13 +187,35 @@ def merchant_routes(merchants, templates, payments):
         return templates.TemplateResponse(request, "merchant_order.html", {
             "order": order, "transcript": transcript, "csrf": csrf(token),
             "simulated": settings.mode == "simulated", "review_id": review["opened_message"] if review else None,
-            "refunds": refunds, "error": error,
+            "refunds": refunds, "error": error, "payment_documents": payment_list,
         }, status_code=status)
 
     @router.get("/orders/{order_id}")
     def order_page(request: Request, order_id: str):
         slug, token = manager(request)
         return render_order(request, slug, token, order_id)
+
+    @router.post("/orders/{order_id}/receipts/{attempt_id}")
+    def upload_receipt(
+        request: Request, order_id: str, attempt_id: str, token: Annotated[str, Form(max_length=128)], file: UploadFile,
+    ):
+        slug, session = manager(request)
+        check_csrf(request, settings.origin, session, token)
+        content = file.file.read(PDF_LIMIT + 1)
+        if len(content) > PDF_LIMIT or not content.startswith(b"%PDF-") or not content.rstrip().endswith(b"%%EOF"):
+            raise OrderError(400, "invalid_request", "Загрузите PDF-файл размером до 512 КБ.")
+        with store.transaction() as db:
+            merchant_order(db, slug, order_id)
+            flags = checkout_flags(db, slug)
+            if settings.mode != "live" or not (flags["receipt_download"] or flags["receipt_email"]) or not db.execute(
+                "SELECT 1 FROM attempts WHERE id = ? AND order_id = ? AND state = 'succeeded'", (attempt_id, order_id),
+            ).fetchone():
+                raise OrderError(404, "document_not_found", "Прикрепить чек можно к подтверждённому платежу.")
+            db.execute(
+                """INSERT INTO payment_receipts VALUES (?, ?) ON CONFLICT(attempt_id) DO UPDATE SET pdf=excluded.pdf""",
+                (attempt_id, content),
+            )
+        return RedirectResponse(f"/merchant/orders/{order_id}#payment-documents", status_code=303)
 
     @router.post("/orders/{order_id}/refunds")
     def order_refunds(
@@ -287,10 +320,28 @@ def merchant_routes(merchants, templates, payments):
             "catalog": "Прайс опубликован.", "connection": "Токен сохранён.",
             "model": "Модель проверена и сохранена.", "model-off": "Модель отключена.",
             "model-account": "Аккаунт OpenRouter подключён. Модель проверена.",
+            "checkout": "Настройки оплаты сохранены.",
         }
         updated = request.query_params.get("updated")
         error = "OpenRouter не подключён. Проверьте доступ к модели и повторите вход." if updated == "model-account-error" else ""
         return dashboard(request, slug, token, notice=notices.get(updated, ""), error=error, page=review_page)
+
+    @router.post("/checkout-settings")
+    def save_checkout_settings(
+        request: Request, token: Annotated[str, Form(max_length=128)],
+        split_payments: Annotated[bool, Form()] = False, tips: Annotated[bool, Form()] = False,
+        receipt_download: Annotated[bool, Form()] = False, receipt_email: Annotated[bool, Form()] = False,
+    ):
+        slug, session = manager(request)
+        check_csrf(request, settings.origin, session, token)
+        with store.transaction() as db:
+            db.execute(
+                """INSERT INTO checkout_settings VALUES (?, ?, ?, ?, ?) ON CONFLICT(merchant) DO UPDATE SET
+                   split_payments=excluded.split_payments, tips=excluded.tips,
+                   receipt_download=excluded.receipt_download, receipt_email=excluded.receipt_email""",
+                (slug, split_payments, tips, receipt_download, receipt_email),
+            )
+        return RedirectResponse("/merchant?updated=checkout#checkout-settings", status_code=303)
 
     @router.get("/example.csv")
     def example():

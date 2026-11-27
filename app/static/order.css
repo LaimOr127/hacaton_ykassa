@@ -87,6 +87,14 @@ button:disabled { cursor: wait; opacity: .65; }
 .payment-hint { color: var(--muted); font-size: .88rem; margin: 8px 0 0; }
 .payment-choice { display: grid; gap: 6px; margin-top: 14px; }
 .payment-choice select { color: var(--ink); background: var(--panel); padding: 8px; min-height: 44px; border: 1px solid var(--edge); border-radius: 6px; font: inherit; }
+#payment-documents summary { font-weight: 650; cursor: pointer; }
+#refresh-documents { margin-top: 12px; }
+.payment-document { border-top: 1px solid var(--edge); padding: 12px 0; }
+.payment-document h4 { margin: 0 0 8px; }
+.payment-document form { margin-top: 10px; }
+.payment-document input, .payment-document select { width: 100%; padding: 8px; min-height: 44px; color: var(--ink); background: var(--panel); border: 1px solid var(--edge); border-radius: 6px; font: inherit; }
+.document-links { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.document-links a { color: var(--accent); }
 .seller-review {
   background: var(--reply); padding: 10px 14px; border-inline-start: 3px solid var(--accent);
   white-space: pre-wrap; overflow-wrap: anywhere;

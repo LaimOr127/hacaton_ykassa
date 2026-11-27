@@ -57,6 +57,8 @@
               <li id="payment-verified">Проверка оплаты</li>
             </ol>
             <p id="payment-status" role="status"></p>
+            <p id="split-progress" class="payment-hint" hidden></p>
+            <p id="tip-total" class="payment-hint" hidden></p>
             <p id="invoice-expiry" class="payment-hint" hidden></p>
             {% if invoices %}
             <div id="payment-choice" class="payment-choice" hidden>
@@ -65,6 +67,28 @@
                 <option value="payment">Прямая оплата</option>
                 <option value="invoice">Счёт со ссылкой для оплаты</option>
               </select>
+            </div>
+            {% endif %}
+            {% if checkout_features.split_payments or checkout_features.tips %}
+            <div id="checkout-options" class="payment-choice" hidden>
+              {% if checkout_features.split_payments %}
+              <label for="payment-parts">Разделить оплату</label>
+              <select id="payment-parts">
+                <option value="1">Один платёж</option>
+                <option value="2">На двоих</option>
+                <option value="3">На троих</option>
+                <option value="4">На четверых</option>
+              </select>
+              {% endif %}
+              {% if checkout_features.tips %}
+              <label for="payment-tip">Чаевые от суммы к оплате</label>
+              <select id="payment-tip">
+                <option value="0">Без чаевых</option>
+                <option value="5">5%</option>
+                <option value="10">10%</option>
+                <option value="15">15%</option>
+              </select>
+              {% endif %}
             </div>
             {% endif %}
             <div class="actions">
@@ -78,6 +102,14 @@
             <p id="checkout-hint" class="payment-hint" hidden>Оплата откроется в новой вкладке. После неё вернитесь к заказу.</p>
             <p id="payment-action-status" class="payment-hint" role="status"></p>
           </section>
+          {% if checkout_features.receipt_download or (checkout_features.receipt_email and mail_ready) %}
+          <details class="payment-panel" id="payment-documents" hidden>
+            <summary>Документы по оплате</summary>
+            <div id="document-list"></div>
+            <button id="refresh-documents" class="secondary" type="button">Обновить список</button>
+            <p id="document-status" class="payment-hint" role="status"></p>
+          </details>
+          {% endif %}
         </aside>
       </div>
     </main>

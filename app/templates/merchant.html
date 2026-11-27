@@ -25,6 +25,7 @@
     </div>
     <nav class="section-nav" aria-label="Разделы кабинета">
       <a href="#orders">Заказы</a><a href="#catalog">Прайс и предоплата</a><a href="#connection">Оплата</a>
+      <a href="#checkout-settings">Настройки оплаты</a>
       <a href="#model">Языковая модель</a>
       {% if reviews or review_page > 1 %}<a href="#reviews">Сверка платежей</a>{% endif %}
     </nav>
@@ -188,6 +189,28 @@
             <button>Проверить и сохранить токен</button>
           </form>
         {% endif %}
+      </section>
+      <section class="workspace-panel catalog-panel" id="checkout-settings" aria-labelledby="checkout-heading">
+        <h2 id="checkout-heading">Настройки оплаты</h2>
+        <form method="post" action="/merchant/checkout-settings">
+          <input type="hidden" name="token" value="{{ csrf }}">
+          <div class="switch-grid">
+            {% set options = [
+              ("split_payments", "Разделение оплаты", "2–4 доли с отдельной ссылкой на каждую"),
+              ("tips", "Чаевые", "Покупатель сам выбирает 0, 5, 10 или 15%"),
+              ("receipt_download", "Скачивание документов", "Подтверждение оплаты и чек от продавца"),
+              ("receipt_email", "Отправка на почту", "По запросу покупателя" if mail_ready else "Станет доступна после настройки почты")
+            ] %}
+            {% for id, label, help in options %}
+            <label class="checkout-option" for="option-{{ id }}">
+              <span>{{ label }}<small id="hint-{{ id }}">{{ help }}</small></span>
+              <input class="checkout-switch" id="option-{{ id }}" type="checkbox" role="switch" aria-describedby="hint-{{ id }}"
+                name="{{ id }}" value="true" {% if checkout_features[id] %}checked{% endif %}>
+            </label>
+            {% endfor %}
+          </div>
+          <button>Сохранить настройки</button>
+        </form>
       </section>
       <section class="workspace-panel catalog-panel" id="catalog" aria-labelledby="catalog-heading">
         <div class="panel-heading"><h2 id="catalog-heading">Прайс и предоплата</h2><span class="hint">Позиций: {{ products|length }}</span></div>

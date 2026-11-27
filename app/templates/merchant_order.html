@@ -43,6 +43,12 @@
             <span class="money">{{ '%.2f'|format(line.amount_kopecks / 100) }} ₽</span></li>
         {% endfor %}</ul>
         <p><strong>Итого {{ '%.2f'|format(order.total_kopecks / 100) }} ₽</strong></p>
+        {% if order.checkout and order.checkout.parts > 1 %}
+          <p>Оплачено {{ order.checkout.paid_parts }} из {{ order.checkout.parts }} долей.</p>
+        {% endif %}
+        {% if order.checkout and order.checkout.tip_kopecks %}
+          <p>Чаевые {{ '%.2f'|format(order.checkout.tip_kopecks / 100) }} ₽</p>
+        {% endif %}
         {% if order.status in ["paid", "deposit_received"] %}
           <p class="pill paid">{{ "Предоплата получена" if order.status == "deposit_received" else "Оплачен" }}</p>
           {% if order.balance_kopecks %}<p>Остаток {{ '%.2f'|format(order.balance_kopecks / 100) }} ₽</p>{% endif %}
@@ -53,7 +59,24 @@
           {% endif %}
         {% endif %}
       </aside>
-      {% if not simulated and order.status in ["paid", "deposit_received"] %}
+      {% if payment_documents %}
+      <section class="workspace-panel catalog-panel" id="payment-documents" aria-labelledby="docs-heading">
+        <h2 id="docs-heading">Кассовые чеки</h2>
+        <p>Прикрепите PDF из ЮKassa или от оператора фискальных данных. Покупатель увидит его рядом с подтверждением оплаты.</p>
+        {% for payment in payment_documents %}
+        <article class="review-row">
+          <h3>{{ "Доля " ~ payment.part_number if payment.part_number else "Платёж" }} · #{{ payment.id[:8] }}</h3>
+          <form method="post" enctype="multipart/form-data" action="/merchant/orders/{{ order.id }}/receipts/{{ payment.id }}">
+            <input type="hidden" name="token" value="{{ csrf }}">
+            <label for="pdf-{{ payment.id }}">{{ "Заменить прикреплённый PDF" if payment.has_receipt else "Выбрать PDF чека" }}</label>
+            <input id="pdf-{{ payment.id }}" type="file" name="file" accept="application/pdf,.pdf" required>
+            <button>Сохранить чек</button>
+          </form>
+        </article>
+        {% endfor %}
+      </section>
+      {% endif %}
+      {% if not simulated and (order.status in ["paid", "deposit_received"] or (order.checkout and order.checkout.paid_parts)) %}
       <section class="workspace-panel catalog-panel" aria-labelledby="refunds-heading">
         <h2 id="refunds-heading">Возвраты по заказу</h2>
         <form action="/merchant/orders/{{ order.id }}/refunds" method="post">
