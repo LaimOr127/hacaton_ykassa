@@ -71,6 +71,11 @@ def test_guest_claim_and_paid_order_sync_across_devices(tmp_path):
         assert phone.get(url).json()["status"] == "paid"
         confirm = f"/s/coffee/orders/{order['id']}/documents/{payment.json()['id']}/confirmation"
         assert laptop.get(confirm).status_code == 200
+        for _ in range(30):
+            assert laptop.post("/api/v1/orders", headers=key(headers)).status_code == 201
+        first_page = phone.get("/account")
+        assert order["id"] not in first_page.text and "Следующая страница" in first_page.text
+        assert order["id"] in phone.get("/account?page=2").text
 
         assert password(old_guest, "other").status_code == 200
         old_guest.get("/")

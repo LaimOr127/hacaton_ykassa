@@ -25,8 +25,14 @@
         {% for order in purchases %}
         <p><a href="/s/{{ order.merchant }}/orders/{{ order.id }}">{{ order.name }} · #{{ order.id[:8] }}</a> · {{ labels[order.state] }}</p>
         {% else %}
-        <p>В этой учётной записи пока нет заказов.</p>
+        <p>{{ "На этой странице нет заказов." if history_page > 1 else "В этой учётной записи пока нет заказов." }}</p>
         {% endfor %}
+        {% if history_page > 1 or history_more %}
+        <nav class="section-nav" aria-label="Страницы истории заказов">
+          {% if history_page > 1 %}<a href="/account?page={{ history_page - 1 }}">Предыдущая страница</a>{% endif %}
+          {% if history_more %}<a href="/account?page={{ history_page + 1 }}">Следующая страница</a>{% endif %}
+        </nav>
+        {% endif %}
         {% if local %}
         <form action="/account/claim" method="post">
           <input type="hidden" name="token" value="{{ session_csrf }}">

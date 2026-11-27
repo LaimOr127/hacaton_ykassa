@@ -187,7 +187,7 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
             if re.fullmatch(r"[a-z][a-z0-9-]{2,31}", slug) and SESSION_TOKEN.fullmatch(token):
                 accounts.claim_guest(db, session_id(request, token, slug), owner, slug)
 
-    app.include_router(account_routes(accounts, TEMPLATES, viewer, claim_guests), include_in_schema=False)
+    app.include_router(account_routes(accounts, TEMPLATES, viewer, claim_guests, catalog), include_in_schema=False)
 
     def session(request, *, write=False, slug=None):
         slug = slug or request.headers.get("X-Shop", catalog.merchant_id)

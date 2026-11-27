@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 
 import httpx
 import jwt
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -25,7 +25,7 @@ class MaxLaunch(BaseModel):
     init_data: str = Field(min_length=10, max_length=8192)
 
 
-def account_routes(accounts, templates, viewer, claim_guests):
+def account_routes(accounts, templates, viewer, claim_guests, default_catalog):
     router = APIRouter(prefix="/account")
     settings, store = accounts.settings, accounts.store
     local = settings.accounts_enabled and settings.access == "local"
@@ -53,7 +53,7 @@ def account_routes(accounts, templates, viewer, claim_guests):
         response.delete_cookie(accounts.legacy_seller_cookie, httponly=True, secure=settings.secure, samesite="strict")
         return response
 
-    def page(request, *, notice="", error="", status=200):
+    def page(request, *, notice="", error="", status=200, history_page=1):
         if not local and settings.access != "private":
             require_local()
         owner, token = viewer(request)
@@ -65,10 +65,12 @@ def account_routes(accounts, templates, viewer, claim_guests):
         if owner:
             with store.read() as db:
                 purchases = db.execute(
-                    """SELECT o.id, o.merchant, o.state, COALESCE(m.name, o.merchant) AS name
+                    """SELECT o.id, o.merchant, o.state,
+                       COALESCE(m.name, CASE WHEN o.merchant = ? THEN ? ELSE o.merchant END) AS name
                        FROM shopper_owners s JOIN orders o ON o.session_id = s.session_id
                        LEFT JOIN merchants m ON o.merchant = m.slug
-                       WHERE s.owner_id = ? ORDER BY o.rowid DESC LIMIT 100""", (owner,),
+                       WHERE s.owner_id = ? ORDER BY o.rowid DESC LIMIT 31 OFFSET ?""",
+                    (default_catalog.merchant_id, default_catalog.title, owner, (history_page - 1) * 30),
                 ).fetchall()
                 if current:
                     identities = [PROVIDERS[r[0]] for r in db.execute(
@@ -82,7 +84,8 @@ def account_routes(accounts, templates, viewer, claim_guests):
         response = templates.TemplateResponse(request, "account.html", {
             "browser_csrf": csrf(browser_secret(request, browser)), "session_csrf": csrf(token) if owner else "",
             "logged_in": bool(owner), "local": local, "username": current["username"] if current else None,
-            "methods": identities, "purchases": purchases, "stores": stores,
+            "methods": identities, "purchases": purchases[:30], "stores": stores,
+            "history_page": history_page, "history_more": len(purchases) > 30,
             "providers": {name: PROVIDERS[name] for name in settings.social_clients} if local else {},
             "email_ready": local and settings.mail_ready, "max_enabled": max_enabled,
             "notice": notice, "error": error,
@@ -92,10 +95,11 @@ def account_routes(accounts, templates, viewer, claim_guests):
         return response
 
     @router.get("")
-    def home(request: Request):
+    def home(request: Request, history_page: Annotated[int, Query(alias="page", ge=1, le=10_000_000)] = 1):
         return page(request,
                     notice="Гостевые заказы на этом устройстве проверены." if request.query_params.get("claimed") == "1" else "",
-                    error="Вход не завершён. Запустите его заново." if request.query_params.get("login") == "interrupted" else "")
+                    error="Вход не завершён. Запустите его заново." if request.query_params.get("login") == "interrupted" else "",
+                    history_page=history_page)
 
     @router.post("/password/{action}")
     def password_login(
