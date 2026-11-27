@@ -30,6 +30,37 @@ CREATE INDEX IF NOT EXISTS auth_attempts_time ON auth_attempts(attempted_at);
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY, merchant TEXT NOT NULL, expires_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS accounts (
+    id TEXT PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT
+);
+CREATE TABLE IF NOT EXISTS account_identities (
+    provider TEXT NOT NULL, subject TEXT NOT NULL, account_id TEXT NOT NULL REFERENCES accounts(id),
+    PRIMARY KEY (provider, subject)
+);
+CREATE INDEX IF NOT EXISTS account_identities_owner ON account_identities(account_id);
+CREATE TABLE IF NOT EXISTS account_sessions (
+    id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id),
+    expires_at INTEGER NOT NULL, merchant TEXT
+);
+CREATE INDEX IF NOT EXISTS account_sessions_owner ON account_sessions(account_id);
+CREATE INDEX IF NOT EXISTS account_sessions_expiry ON account_sessions(expires_at);
+CREATE TABLE IF NOT EXISTS account_auth_attempts (
+    address TEXT NOT NULL, attempted_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS account_auth_attempts_time ON account_auth_attempts(attempted_at);
+CREATE TABLE IF NOT EXISTS account_merchants (
+    account_id TEXT NOT NULL REFERENCES accounts(id), merchant TEXT NOT NULL REFERENCES merchants(slug),
+    PRIMARY KEY (account_id, merchant)
+);
+CREATE TABLE IF NOT EXISTS shopper_owners (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id), owner_id TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS shopper_owners_owner ON shopper_owners(owner_id, session_id);
+CREATE TABLE IF NOT EXISTS account_flows (
+    id TEXT PRIMARY KEY, provider TEXT NOT NULL, browser TEXT NOT NULL, session_hash TEXT,
+    secret TEXT NOT NULL, verified_subject TEXT, expires_at INTEGER NOT NULL, legacy_merchant TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS account_flows_expiry ON account_flows(expires_at);
 CREATE TABLE IF NOT EXISTS orders (
     id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id),
     merchant TEXT NOT NULL, create_key TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1,

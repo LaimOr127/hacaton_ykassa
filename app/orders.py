@@ -20,13 +20,31 @@ class OrderError(Exception):
 
 
 def lookup_order(db, session, order_id):
+    owner = session_owner(db, session)
     row = db.execute(
-        "SELECT * FROM orders WHERE id = ? AND session_id = ? AND merchant = ?",
-        (order_id, session["id"], session["merchant"]),
+        """SELECT o.* FROM orders o LEFT JOIN shopper_owners s ON s.session_id = o.session_id
+           WHERE o.id = ? AND o.merchant = ? AND
+           ((? IS NULL AND s.owner_id IS NULL AND o.session_id = ?) OR s.owner_id = ?)""",
+        (order_id, session["merchant"], owner, session["id"], owner),
     ).fetchone()
     if row is None:
         raise OrderError(404, "order_not_found", "Заказ не найден.")
     return row
+
+
+def session_owner(db, session):
+    owner = session["owner_id"] if "owner_id" in session.keys() else None
+    linked = db.execute("SELECT owner_id FROM shopper_owners WHERE session_id = ?", (session["id"],)).fetchone()
+    if (linked["owner_id"] if linked else None) != owner:
+        raise OrderError(401, "session_required", "Войдите в учётную запись владельца заказа.")
+    if "auth_session_id" in session.keys() and session["auth_session_id"]:
+        active = db.execute(
+            "SELECT account_id FROM account_sessions WHERE id = ? AND expires_at > ?",
+            (session["auth_session_id"], int(time.time())),
+        ).fetchone()
+        if not active or "local:" + active["account_id"] != owner:
+            raise OrderError(401, "session_required", "Сессия входа истекла.")
+    return owner
 
 
 def public_order(db, row):
@@ -101,6 +119,7 @@ class Orders:
 
     def create(self, session, key: str):
         with self.store.transaction() as db:
+            session_owner(db, session)
             row = db.execute(
                 "SELECT id FROM orders WHERE session_id = ? AND create_key = ?",
                 (session["id"], key),

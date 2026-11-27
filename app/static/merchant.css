@@ -37,6 +37,10 @@
 .merchant form .hint { margin: 0; }
 .account-connect { padding: 12px; background: var(--reply); border-radius: 8px; }
 .model-manual { margin-top: 18px; }
+.account-methods { margin-top: 18px; }
+.account-methods details { margin-top: 18px; }
+.account-providers { display: flex; flex-wrap: wrap; gap: 8px; }
+.account-providers form { margin: 0; }
 .switch-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr)); gap: 8px 16px; margin-bottom: 8px; }
 .checkout-option { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; background: var(--reply); border-radius: 8px; cursor: pointer; }
 .checkout-option small { display: block; font-weight: 400; color: var(--muted); }

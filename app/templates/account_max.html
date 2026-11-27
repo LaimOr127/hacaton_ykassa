@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Вход через MAX</title>
+  <link rel="stylesheet" href="/static/order.css">
+  <link rel="stylesheet" href="/static/merchant.css">
+  {% if miniapp %}
+  <script src="https://st.max.ru/js/max-web-app.js" defer></script>
+  <script src="/static/account-max.js" defer></script>
+  {% endif %}
+</head>
+<body class="merchant">
+  <header class="masthead"><a class="brand" href="/account">Заказ из переписки</a></header>
+  <main class="entry">
+    <section class="workspace-panel">
+      <h1>Вход через MAX</h1>
+      {% if miniapp %}
+      <p>Подтвердите вход для сайта, на котором вы открыли эту ссылку.</p>
+      <button id="confirm-max">Подтвердить вход</button>
+      <p id="max-status" role="status"></p>
+      {% else %}
+      {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+      <p>Откройте мини-приложение MAX и подтвердите вход. Вернитесь сюда и введите код из MAX.</p>
+      <a class="button" href="{{ url }}" target="_blank" rel="noopener noreferrer">Открыть MAX</a>
+      <form action="/account/max/finish" method="post">
+        <input type="hidden" name="token" value="{{ token }}">
+        <input type="hidden" name="state" value="{{ state }}">
+        <label for="max-code">Код подтверждения</label>
+        <input id="max-code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="8"
+               pattern="[0-9]{8}" required>
+        <button class="secondary">Завершить вход</button>
+      </form>
+      {% endif %}
+    </section>
+  </main>
+</body>
+</html>

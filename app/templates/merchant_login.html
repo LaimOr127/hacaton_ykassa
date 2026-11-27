@@ -11,6 +11,11 @@
   <header class="masthead"><a class="brand" href="/merchant/login">Заказ из переписки</a><a href="/">Витрина</a></header>
   <main class="entry">
     <h1>Кабинет продавца</h1>
+    {% if accounts_enabled and not has_account %}
+    <p><a href="/account">Войти в учётную запись</a>, чтобы сохранить доступ к магазину на других устройствах.</p>
+    {% elif has_account %}
+    <p>После проверки кода магазин появится в вашей учётной записи.</p>
+    {% endif %}
     {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
     {% if private %}
     <section class="workspace-panel" aria-labelledby="activation">

@@ -36,6 +36,10 @@ class Settings:
     mail_from: str = ""
     mail_user: str = ""
     mail_password: str = field(default="", repr=False)
+    accounts_enabled: bool = False
+    social_clients: dict[str, list[str]] = field(default_factory=dict, repr=False)
+    max_bot_name: str = ""
+    max_bot_token: str = field(default="", repr=False)
 
     def __post_init__(self):
         origin = urlsplit(self.origin)
@@ -88,6 +92,18 @@ class Settings:
             separator in self.mail_from for separator in "\r\n"
         ):
             raise ValueError("Проверьте порт, отправителя и учётные данные SMTP")
+        if not isinstance(self.social_clients, dict) or any(
+            key not in {"google", "yandex", "vk", "telegram"}
+            or not isinstance(value, list) or len(value) != 2
+            or any(not isinstance(part, str) or len(part) > 512 for part in value)
+            or not value[0] or (key != "vk" and not value[1])
+            for key, value in self.social_clients.items()
+        ):
+            raise ValueError("SOCIAL_AUTH_JSON должен содержать пары идентификатора и секрета OAuth")
+        if bool(self.max_bot_name) != bool(self.max_bot_token) or (
+            self.max_bot_name and not re.fullmatch(r"[a-zA-Z0-9_]{3,80}", self.max_bot_name)
+        ):
+            raise ValueError("Проверьте настройки бота MAX")
 
     @property
     def mail_ready(self) -> bool:
@@ -132,4 +148,8 @@ class Settings:
             mail_from=os.getenv("MAIL_FROM", ""),
             mail_user=os.getenv("MAIL_SMTP_USER", ""),
             mail_password=os.getenv("MAIL_SMTP_PASSWORD", ""),
+            accounts_enabled=os.getenv("ACCOUNT_AUTH_ENABLED") == "1",
+            social_clients=json.loads(os.getenv("SOCIAL_AUTH_JSON") or "{}"),
+            max_bot_name=os.getenv("MAX_BOT_NAME", ""),
+            max_bot_token=os.getenv("MAX_BOT_TOKEN", ""),
         )
