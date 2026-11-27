@@ -1,6 +1,7 @@
 import json
 import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Literal
 from urllib.parse import urlsplit
@@ -19,9 +20,9 @@ class ProviderAmount(BaseModel):
     currency: StrictStr = Field(pattern=r"^[A-Z]{3}$")
 
 
-class Payment(BaseModel):
+class ListedPayment(BaseModel):
     id: StrictStr = Field(min_length=1, max_length=128)
-    status: Literal["pending", "succeeded", "canceled"]
+    status: StrictStr
     amount: ProviderAmount
     confirmation_url: StrictStr | None = None
     description: StrictStr | None = None
@@ -31,8 +32,43 @@ class Payment(BaseModel):
         return int(Decimal(self.amount.value) * 100)
 
 
+class Payment(ListedPayment):
+    status: Literal["pending", "succeeded", "canceled"]
+
+
+class LinkedPayment(BaseModel):
+    id: StrictStr = Field(min_length=1, max_length=128)
+    status: StrictStr
+
+
+class Invoice(Payment):
+    confirmation_url: StrictStr | None = Field(default=None, validation_alias="url")
+    expires_at: datetime | None = None
+    payment_details: LinkedPayment | None = None
+
+
+class Refund(BaseModel):
+    id: StrictStr = Field(min_length=1, max_length=128)
+    payment_id: StrictStr = Field(min_length=1, max_length=128)
+    status: Literal["pending", "succeeded", "canceled"]
+    amount: ProviderAmount
+
+
+class MCPPage[Item: BaseModel](BaseModel):
+    items: list[Item] = Field(max_length=100)
+    next_cursor: StrictStr | None = Field(default=None, max_length=4096)
+
+
+INVOICE_LIFETIME = 24 * 3600
+YOO_TOOLS = {
+    "create_payment": "Создание платежа", "get_payment": "Проверка платежа",
+    "get_payments_list": "Поиск платежей", "get_refunds_list": "Список возвратов",
+    "get_refund": "Детали возврата", "create_invoice": "Выставление счёта", "get_invoice": "Проверка счёта",
+}
+
+
 class PaymentNotSent(Exception):
-    """Ошибка до передачи вызова create_payment серверу."""
+    """Ошибка до передачи создания платежа или счёта серверу."""
 
 
 class InvalidPaymentResponse(Exception):
@@ -58,6 +94,14 @@ def amount_value(kopecks: int) -> str:
     return f"{kopecks // 100}.{kopecks % 100:02d}"
 
 
+def provider_amount(kopecks: int) -> dict:
+    return {"value": amount_value(kopecks), "currency": "RUB"}
+
+
+def utc_iso(timestamp: int) -> str:
+    return datetime.fromtimestamp(timestamp, UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
 def payment_reference(attempt_id: str) -> str:
     return f"Order {attempt_id}"
 
@@ -65,12 +109,16 @@ def payment_reference(attempt_id: str) -> str:
 def trusted_checkout(url: str | None) -> str | None:
     if not url or len(url) > 2048 or any(c.isspace() or c == "\\" for c in url):
         return None
-    parsed = urlsplit(url)
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return None
     host = parsed.hostname or ""
     if (
         parsed.scheme != "https"
         or parsed.username is not None
-        or parsed.port not in {443, None}
+        or port not in {443, None}
         or not any(host == base or host.endswith("." + base) for base in ("yookassa.ru", "yoomoney.ru"))
     ):
         return None
@@ -92,50 +140,113 @@ class YooKassa:
                         await session.initialize()
                         yield session
 
-    def check(self) -> bool:
+    def tools(self) -> set[str]:
         async def available():
             async with self.session() as session:
                 listed = await session.list_tools()
-                return {"create_payment", "get_payment"} <= {tool.name for tool in listed.tools}
-
+                return {tool.name for tool in listed.tools}
         return anyio.run(available)
 
-    async def call(self, name: str, arguments: dict) -> Payment:
-        tool_started = False
-        try:
-            async with self.session() as session:
-                tool_started = True
-                response = await session.call_tool(name, arguments)
-        except Exception as error:
-            connection_refused = only_errors(error, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
-            if name == "create_payment" and (not tool_started or connection_refused):
-                raise PaymentNotSent() from error
-            if name == "get_payment" and has_error(error, (ValidationError, ValueError)):
-                # SDK валидирует JSON-RPC до возврата результата инструмента.
-                raise InvalidPaymentResponse() from error
-            raise
+    def check(self) -> bool:
+        return {"create_payment", "get_payment"} <= self.tools()
+
+    @staticmethod
+    def parse(response, schema):
         if response.isError:
             raise ValueError("MCP вернул ошибку операции")
         data = response.structuredContent
         try:
             if data is None and len(response.content) == 1 and response.content[0].type == "text":
                 data = json.loads(response.content[0].text)
-            return Payment.model_validate(data)
+            return schema.model_validate(data)
         except (ValidationError, ValueError) as error:
             external_id = data.get("id") if isinstance(data, dict) else None
             if isinstance(external_id, str) and 1 <= len(external_id) <= 128:
                 raise InvalidPaymentResponse(external_id) from error
             raise InvalidPaymentResponse() from error
 
+    async def call(self, name: str, arguments: dict, schema=Payment):
+        tool_started = False
+        try:
+            async with self.session() as session:
+                if name == "create_invoice":
+                    listed = await session.list_tools()
+                    if not {"create_invoice", "get_invoice"} <= {tool.name for tool in listed.tools}:
+                        raise PaymentNotSent()
+                tool_started = True
+                response = await session.call_tool(name, arguments)
+        except Exception as error:
+            connection_refused = only_errors(error, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout))
+            if name in {"create_payment", "create_invoice"} and (not tool_started or connection_refused):
+                raise PaymentNotSent() from error
+            if name in {"get_payment", "get_invoice"} and has_error(error, (ValidationError, ValueError)):
+                # SDK валидирует JSON-RPC до возврата результата инструмента.
+                raise InvalidPaymentResponse() from error
+            raise
+        return self.parse(response, schema)
+
     def create(self, amount: int, attempt_id: str) -> Payment:
         return anyio.run(
             self.call,
             "create_payment",
-            {"amount": {"value": amount_value(amount), "currency": "RUB"}, "description": payment_reference(attempt_id)},
+            {"amount": provider_amount(amount), "description": payment_reference(attempt_id)},
         )
 
     def get(self, external_id: str) -> Payment:
         return anyio.run(self.call, "get_payment", {"id": external_id})
+
+    def create_invoice(self, snapshot: dict, attempt_id: str, order_id: str, created_at: int) -> Invoice:
+        amount = provider_amount(snapshot["payable_kopecks"])
+        if snapshot["balance_kopecks"]:
+            cart = [{"description": f"Предоплата за заказ #{order_id[:8]}", "price": amount, "quantity": 1}]
+        else:
+            cart = [
+                {"description": item["title"][:128], "price": provider_amount(item["unit_kopecks"]), "quantity": item["quantity"]}
+                for item in snapshot["items"]
+            ]
+        return anyio.run(self.call, "create_invoice", {
+            "amount": amount, "description": payment_reference(attempt_id),
+            "expires_at": utc_iso(created_at + INVOICE_LIFETIME), "cart": cart,
+        }, Invoice)
+
+    def get_invoice(self, external_id: str) -> Invoice:
+        return anyio.run(self.call, "get_invoice", {"id": external_id}, Invoice)
+
+    async def pages(self, name, filters, item_type):
+        schema = MCPPage[item_type]
+        items = []
+        cursor = None
+        seen = set()
+        async with self.session() as session:
+            for _ in range(4):
+                arguments = {**filters, "limit": 100}
+                if cursor:
+                    arguments["next_cursor"] = cursor
+                page = self.parse(await session.call_tool(name, arguments), schema)
+                items.extend(page.items)
+                cursor = page.next_cursor
+                if not cursor:
+                    return items
+                if cursor in seen:
+                    break
+                seen.add(cursor)
+        raise ValueError("ЮKassa вернула неполный список.")
+
+    def find_payment(self, created_at: int, attempt_id: str, amount: int) -> str | None:
+        items = anyio.run(self.pages, "get_payments_list", {
+            "created_at_gte": utc_iso(created_at - 120), "created_at_lte": utc_iso(created_at + 600),
+        }, ListedPayment)
+        candidates = {
+            item.id for item in items if item.description == payment_reference(attempt_id)
+            and item.amount.currency == "RUB" and item.kopecks == amount
+        }
+        return next(iter(candidates)) if len(candidates) == 1 else None
+
+    def list_refunds(self, payment_id: str) -> list[Refund]:
+        return anyio.run(self.pages, "get_refunds_list", {"payment_id": payment_id}, Refund)
+
+    def get_refund(self, refund_id: str) -> Refund:
+        return anyio.run(self.call, "get_refund", {"id": refund_id}, Refund)
 
 
 class Simulator:

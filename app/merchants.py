@@ -21,6 +21,7 @@ from .storage import Store
 SLUG = re.compile(r"[a-z][a-z0-9-]{2,31}")
 SKU = re.compile(r"[a-zA-Z0-9_-]{1,40}")
 COLUMNS = ["sku", "title", "basis", "price_kopecks", "area_from", "area_to"]
+CURRENT_MODEL_REVISION = object()
 CLEANING_CSV = """sku,title,basis,price_kopecks,area_from,area_to
 cleaning,Уборка квартиры,area,350000,1,50
 cleaning,Уборка квартиры,area,450000,51,70
@@ -164,7 +165,7 @@ class Merchants:
             configured = bool(previous or (slug == self.default.merchant_id and self.settings.mcp_token))
             self.require_settled_payments(db, slug)
             anchor = db.execute(
-                """SELECT a.id, a.external_id, a.snapshot FROM attempts a JOIN orders o ON o.id = a.order_id
+                """SELECT a.id, a.external_id, a.snapshot, a.kind FROM attempts a JOIN orders o ON o.id = a.order_id
                    WHERE o.merchant = ? AND a.external_id IS NOT NULL AND a.state IN ('succeeded','canceled')
                    ORDER BY a.created_at DESC, a.id DESC LIMIT 1""",
                 (slug,),
@@ -176,7 +177,10 @@ class Merchants:
         try:
             candidate = YooKassa(token)
             ready = candidate.check()
-            anchored_payment = candidate.get(anchor["external_id"]) if ready and anchor else None
+            anchored_payment = None
+            if ready and anchor:
+                read_anchor = candidate.get_invoice if anchor["kind"] == "invoice" else candidate.get
+                anchored_payment = read_anchor(anchor["external_id"])
         except Exception as error:
             raise ValueError("Не удалось проверить токен. Проверьте его и повторите попытку.") from error
         if not ready:
@@ -231,10 +235,13 @@ class Merchants:
         return (self.settings.mcp_token or None) if slug == self.default.merchant_id else None
 
     def model_providers(self):
-        return {
+        providers = {
             "openai": ("OpenAI", "https://api.openai.com/v1"),
             "company": ("Корпоративный API", self.settings.llm_url),
         }
+        if self.settings.openrouter_oauth:
+            providers["openrouter"] = ("OpenRouter", "https://openrouter.ai/api/v1")
+        return providers
 
     def model_summary(self, slug):
         with self.store.read() as db:
@@ -267,7 +274,12 @@ class Merchants:
             raise ValueError("Провайдер не вернул список. Проверьте ключ или укажите название модели вручную.") from error
         return sorted(options)[:100]
 
-    def connect_model(self, slug, provider, model, key):
+    @staticmethod
+    def model_revision(db, slug):
+        row = db.execute("SELECT ciphertext FROM model_connectors WHERE merchant = ?", (slug,)).fetchone()
+        return row["ciphertext"] if row else None
+
+    def connect_model(self, slug, provider, model, key, *, expected_revision=CURRENT_MODEL_REVISION):
         endpoint = self.model_providers().get(provider)
         if self.vault is None:
             raise ValueError("На сервере требуется настройка хранилища ключей.")
@@ -276,8 +288,9 @@ class Merchants:
         if not re.fullmatch(r"[!-~]{12,4096}", key):
             raise ValueError("Проверьте формат API-ключа.")
         with self.store.read() as db:
-            row = db.execute("SELECT ciphertext FROM model_connectors WHERE merchant = ?", (slug,)).fetchone()
-        previous = row["ciphertext"] if row else None
+            previous = self.model_revision(db, slug)
+        if expected_revision is not CURRENT_MODEL_REVISION and expected_revision != previous:
+            return False
         selected = ModelConnection(endpoint[1], model, key)
         try:
             ModelAgent.request(selected, self.default, {}, [], "Мне нужно уточнить условия заказа.")
@@ -292,9 +305,11 @@ class Merchants:
                 (slug, provider, model, ciphertext, previous),
             ).rowcount == 1
 
-    def model_connection(self, slug) -> ModelConnection | None:
-        with self.store.read() as db:
-            row = db.execute("SELECT * FROM model_connectors WHERE merchant = ?", (slug,)).fetchone()
+    def model_connection(self, slug, *, expected_provider=None, db=None) -> ModelConnection | None:
+        with (self.store.read() if db is None else nullcontext(db)) as connection:
+            row = connection.execute("SELECT * FROM model_connectors WHERE merchant = ?", (slug,)).fetchone()
+        if expected_provider is not None and (row is None or row["provider"] != expected_provider):
+            return None
         if not row:
             settings = self.settings
             if settings.llm_key and (settings.access == "local" or slug == self.default.merchant_id):

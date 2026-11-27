@@ -31,10 +31,17 @@ function showNotice(message = "") {
 }
 
 function describePayment() {
-  if (!attempt) return lastDelta;
+  if (!attempt) return lastDelta || (order?.payable_kopecks
+    ? "Проверьте состав и сумму перед подтверждением."
+    : "Добавьте позиции, чтобы перейти к оплате.");
+  const invoice = attempt.kind === "invoice";
+  if (invoice && attempt.status === "pending" && !attempt.confirmation_url && Date.parse(attempt.expires_at) <= Date.now()) {
+    return "Срок счёта истёк. Проверяем его состояние в ЮKassa.";
+  }
   const messages = {
-    creating: "Создаём платёж.",
-    pending: simulated ? "Готово к симуляции оплаты." : "Ожидаем подтверждения ЮKassa.",
+    creating: invoice ? "Выставляем счёт." : "Создаём платёж.",
+    pending: simulated ? "Готово к симуляции оплаты."
+      : invoice ? "Счёт выставлен. Оплатите его на странице ЮKassa." : "Платёж создан. Завершите оплату на странице ЮKassa.",
     succeeded: order.fulfilled ? "Заказ исполнен." : simulated ? "Симуляция оплаты завершена." : (
       order.status === "deposit_received" ? "Предоплата получена." : "Оплата подтверждена."
     ),
@@ -61,10 +68,24 @@ function render() {
   }));
   byId("empty").hidden = items.childElementCount > 0;
   byId("total").textContent = money(order?.total_kopecks ?? 0);
+  byId("order-reference").hidden = !order?.id;
+  byId("order-reference").textContent = order?.id ? `#${order.id.slice(0, 8)}` : "";
   byId("deposit").hidden = !(order?.balance_kopecks > 0);
   byId("deposit").textContent = order?.balance_kopecks > 0
     ? `Сейчас ${money(order.payable_kopecks)}, остаток ${money(order.balance_kopecks)}` : "";
-  byId("payment-status").textContent = describePayment();
+  const status = describePayment();
+  if (byId("payment-status").textContent !== status) byId("payment-status").textContent = status;
+  const stage = order?.status === "paid" || order?.status === "deposit_received" || attempt?.status === "unknown"
+    ? 2 : locked ? 1 : 0;
+  ["payment-review", "payment-provider", "payment-verified"].forEach((id, index) => {
+    const item = byId(id);
+    if (index === stage) item.setAttribute("aria-current", "step");
+    else item.removeAttribute("aria-current");
+    item.classList.toggle("is-complete", index < stage);
+  });
+  byId("invoice-expiry").hidden = !attempt?.expires_at;
+  byId("invoice-expiry").textContent = attempt?.expires_at
+    ? `Счёт действует до ${new Date(attempt.expires_at).toLocaleString("ru-RU", {dateStyle:"short", timeStyle:"short"})}.` : "";
   const reviewMessage = review?.status === "pending" ? "Заказ у продавца. Ответ появится здесь."
     : review?.status === "answered" ? `Ответ продавца\n${review.reply}\nОтправьте уточнённый заказ в чат.` : "";
   const reviewPanel = byId("seller-review");
@@ -72,11 +93,21 @@ function render() {
   if (reviewPanel.textContent !== reviewMessage) reviewPanel.textContent = reviewMessage;
   byId("text").disabled = locked || busy || review?.status === "pending";
   byId("send").disabled = locked || busy || review?.status === "pending";
-  byId("pay").hidden = !order?.payable_kopecks || locked || Boolean(review);
+  const canPay = Boolean(order?.payable_kopecks && !locked && !review);
+  const kind = byId("payment-kind");
+  if (kind) {
+    byId("payment-choice").hidden = !canPay;
+    kind.disabled = busy;
+  }
+  byId("pay").hidden = !canPay;
   byId("pay").disabled = busy;
   byId("pay").textContent = order?.payable_kopecks
-    ? `Подтвердить и оплатить ${money(order.payable_kopecks)}` : "Подтвердить заказ";
+    ? `${kind?.value === "invoice" ? "Выставить счёт на" : "Подтвердить и оплатить"} ${money(order.payable_kopecks)}` : "Подтвердить заказ";
   byId("checkout").hidden = !attempt?.confirmation_url;
+  byId("checkout").textContent = attempt?.kind === "invoice" ? "Открыть счёт в ЮKassa" : "Перейти к оплате в ЮKassa";
+  byId("checkout-hint").hidden = !attempt?.confirmation_url;
+  byId("copy-invoice").hidden = !navigator.clipboard || attempt?.kind !== "invoice" || !attempt?.confirmation_url;
+  if (byId("copy-invoice").hidden) byId("payment-action-status").textContent = "";
   if (attempt?.confirmation_url) byId("checkout").href = attempt.confirmation_url;
   else byId("checkout").removeAttribute("href");
   byId("check-payment").hidden = !["creating", "pending", "unknown"].includes(attempt?.status) && review?.status !== "pending";
@@ -182,15 +213,32 @@ byId("sample")?.addEventListener("click", () => {
 });
 
 byId("pay").addEventListener("click", () => run(async () => {
-  if (payKey?.version !== order.version) payKey = {version: order.version, id: crypto.randomUUID()};
+  const kind = byId("payment-kind")?.value ?? "payment";
+  if (payKey?.version !== order.version || payKey?.kind !== kind) {
+    payKey = {version: order.version, id: crypto.randomUUID(), kind};
+  }
   attempt = await request(`${api}/${order.id}/payment-attempts`, {
-    method: "POST", headers: {"Idempotency-Key": payKey.id}, body: JSON.stringify({order_version: payKey.version}),
+    method: "POST", headers: {"Idempotency-Key": payKey.id}, body: JSON.stringify({order_version: payKey.version, kind}),
   });
   payKey = undefined;
   order = await request(`${api}/${order.id}`);
 }));
 
+byId("payment-kind")?.addEventListener("change", render);
+byId("copy-invoice").addEventListener("click", async () => {
+  const feedback = byId("payment-action-status");
+  if (!attempt?.confirmation_url || attempt.kind !== "invoice") return;
+  try {
+    await navigator.clipboard.writeText(attempt.confirmation_url);
+    feedback.textContent = "Ссылка скопирована.";
+  } catch {
+    feedback.textContent = "Откройте счёт и скопируйте ссылку из адресной строки.";
+  }
+});
 byId("check-payment").addEventListener("click", refreshPayment);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && ["creating", "pending", "unknown"].includes(attempt?.status)) refreshPayment();
+});
 byId("simulate").addEventListener("click", () => run(async () => {
   await request(`/demo/orders/${order.id}/payment-attempts/${attempt.id}/approve`, {
     method: "POST", body: "{}",

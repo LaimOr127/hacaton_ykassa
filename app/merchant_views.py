@@ -8,8 +8,9 @@ from typing import Annotated
 from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import RedirectResponse, Response
 
-from .gateway import payment_reference
+from .gateway import YOO_TOOLS, payment_reference
 from .merchants import CLEANING_CSV, export_catalog
+from .model_oauth import finish_authorization, start_authorization
 from .orders import OrderError, public_order, reopen_draft, seller_transcript
 from .session_security import SESSION_TOKEN, check_csrf, csrf, digest
 
@@ -85,7 +86,10 @@ def merchant_routes(merchants, templates, payments):
         response.set_cookie(session_cookie, token, max_age=age, httponly=True, secure=settings.secure, samesite="strict")
         return response
 
-    def dashboard(request, slug, token, *, error="", status=200, notice="", draft_csv=None, draft_deposit=None, page=1):
+    def dashboard(
+        request, slug, token, *, error="", status=200, notice="", draft_csv=None, draft_deposit=None,
+        page=1, account_models=None, mcp_tools=None,
+    ):
         with store.read() as db:
             owner = db.execute("SELECT name, catalog_version FROM merchants WHERE slug = ?", (slug,)).fetchone()
             catalog = merchants.catalog(db, slug)
@@ -99,7 +103,7 @@ def merchant_routes(merchants, templates, payments):
                 (slug,),
             ).fetchall()
             review = db.execute(
-                """SELECT a.id, a.external_id, a.snapshot, o.id AS order_id FROM attempts a
+                """SELECT a.id, a.external_id, a.candidate_id, a.snapshot, a.kind, o.id AS order_id FROM attempts a
                    JOIN orders o ON o.attempt_id = a.id AND o.id = a.order_id
                    WHERE o.merchant = ? AND (a.state = 'unknown' OR (a.state = 'creating' AND a.created_at <= ?))
                    ORDER BY a.created_at, a.id LIMIT 21 OFFSET ?""",
@@ -129,6 +133,10 @@ def merchant_routes(merchants, templates, payments):
             "slug": slug, "name": owner["name"], "csrf": csrf(token), "error": error, "notice": notice,
             "private": private, "model_connection": merchants.model_summary(slug),
             "model_available": merchants.model_connection(slug) is not None,
+            "openrouter_oauth": settings.openrouter_oauth,
+            "openrouter_model": settings.openrouter_model,
+            "account_models": account_models,
+            "mcp_tools": mcp_tools,
             "default_model": settings.llm_model,
             "model_providers": {key: value[0] for key, value in merchants.model_providers().items()},
             "mode": settings.mode, "connected": bool(merchants.token(slug)), "vault_ready": merchants.vault is not None,
@@ -143,7 +151,8 @@ def merchant_routes(merchants, templates, payments):
             "reviews": [
                 {
                     "id": row["id"], "order": row["order_id"][:8],
-                    "reference": payment_reference(row["id"]), "known": row["external_id"] is not None,
+                    "reference": payment_reference(row["id"]), "known": row["external_id"] is not None, "kind": row["kind"],
+                    "candidate": row["candidate_id"] is not None,
                     "amount": json.loads(row["snapshot"])["payable_kopecks"],
                 }
                 for row in review[:20]
@@ -156,9 +165,7 @@ def merchant_routes(merchants, templates, payments):
             raise OrderError(404, "order_not_found", "Заказ не найден.")
         return row
 
-    @router.get("/orders/{order_id}")
-    def order_page(request: Request, order_id: str):
-        slug, token = manager(request)
+    def render_order(request, slug, token, order_id, *, refunds=None, error="", status=200):
         with store.read() as db:
             order = public_order(db, merchant_order(db, slug, order_id))
             transcript = seller_transcript(db, order_id)
@@ -169,7 +176,28 @@ def merchant_routes(merchants, templates, payments):
         return templates.TemplateResponse(request, "merchant_order.html", {
             "order": order, "transcript": transcript, "csrf": csrf(token),
             "simulated": settings.mode == "simulated", "review_id": review["opened_message"] if review else None,
-        })
+            "refunds": refunds, "error": error,
+        }, status_code=status)
+
+    @router.get("/orders/{order_id}")
+    def order_page(request: Request, order_id: str):
+        slug, token = manager(request)
+        return render_order(request, slug, token, order_id)
+
+    @router.post("/orders/{order_id}/refunds")
+    def order_refunds(
+        request: Request, order_id: str, token: Annotated[str, Form(max_length=128)],
+        refund_id: Annotated[str, Form(pattern=r"^[a-zA-Z0-9_-]{0,128}$")] = "",
+    ):
+        slug, session = manager(request)
+        check_csrf(request, settings.origin, session, token)
+        if settings.mode != "live":
+            raise OrderError(404, "refund_not_found", "Проверка возвратов доступна при подключении ЮKassa.")
+        try:
+            refunds = payments.refunds(slug, order_id, refund_id)
+        except OrderError as error:
+            return render_order(request, slug, session, order_id, error=error.body["message"], status=error.status)
+        return render_order(request, slug, session, order_id, refunds=refunds)
 
     @router.post("/orders/{order_id}/reply")
     def reply_to_order(
@@ -258,8 +286,11 @@ def merchant_routes(merchants, templates, payments):
         notices = {
             "catalog": "Прайс опубликован.", "connection": "Токен сохранён.",
             "model": "Модель проверена и сохранена.", "model-off": "Модель отключена.",
+            "model-account": "Аккаунт OpenRouter подключён. Модель проверена.",
         }
-        return dashboard(request, slug, token, notice=notices.get(request.query_params.get("updated"), ""), page=review_page)
+        updated = request.query_params.get("updated")
+        error = "OpenRouter не подключён. Проверьте доступ к модели и повторите вход." if updated == "model-account-error" else ""
+        return dashboard(request, slug, token, notice=notices.get(updated, ""), error=error, page=review_page)
 
     @router.get("/example.csv")
     def example():
@@ -298,6 +329,22 @@ def merchant_routes(merchants, templates, payments):
             return dashboard(request, slug, session, error=str(error), status=400)
         return RedirectResponse("/merchant?updated=connection", status_code=303)
 
+    @router.post("/connection/tools")
+    def check_mcp_tools(request: Request, token: Annotated[str, Form(max_length=128)]):
+        slug, session = manager(request)
+        check_csrf(request, settings.origin, session, token)
+        gateway = payments.gateway_for(slug) if settings.mode == "live" else None
+        if gateway is None:
+            raise OrderError(409, "payment_unavailable", "Сначала подключите ЮKassa.")
+        try:
+            available = gateway.tools()
+        except Exception:
+            return dashboard(request, slug, session, error="ЮKassa не вернула список инструментов.", status=503)
+        return dashboard(request, slug, session, mcp_tools=[
+            (label, tool in available, tool in {"create_invoice", "get_invoice"} and not settings.mcp_invoices)
+            for tool, label in YOO_TOOLS.items()
+        ])
+
     @router.post("/model")
     def connect_model(
         request: Request, token: Annotated[str, Form(max_length=128)],
@@ -322,6 +369,68 @@ def merchant_routes(merchants, templates, payments):
         check_csrf(request, settings.origin, session, token)
         merchants.disconnect_model(slug)
         return RedirectResponse("/merchant?updated=model-off", status_code=303)
+
+    def model_account(request):
+        if settings.mode != "live" or not settings.openrouter_oauth or merchants.vault is None:
+            raise OrderError(404, "model_account_unavailable", "Вход через OpenRouter недоступен.")
+        slug, session = manager(request)
+        owner = "oidc:" + request.state.corporate_subject if private else "session:" + session
+        return slug, session, digest(owner)
+
+    @router.post("/model/openrouter")
+    def authorize_model_account(request: Request, token: Annotated[str, Form(max_length=128)]):
+        slug, session, owner = model_account(request)
+        check_csrf(request, settings.origin, session, token)
+        response = RedirectResponse(start_authorization(merchants, slug, owner), status_code=303)
+        if not private:
+            response.set_cookie(
+                session_cookie, session, max_age=age, httponly=True, secure=settings.secure, samesite="lax",
+            )
+        return response
+
+    @router.get("/model/openrouter/callback")
+    def connect_model_account(request: Request):
+        try:
+            slug, _, owner = model_account(request)
+            connected = finish_authorization(
+                merchants, slug, owner, request.query_params.get("state", ""), request.query_params.get("code", ""),
+            )
+        except (ValueError, OrderError):
+            connected = False
+        updated = "model-account" if connected else "model-account-error"
+        return RedirectResponse("/merchant?updated=" + updated + "#model", status_code=303)
+
+    @router.post("/model/openrouter/models")
+    def account_model_options(request: Request, token: Annotated[str, Form(max_length=128)]):
+        slug, session, _ = model_account(request)
+        check_csrf(request, settings.origin, session, token)
+        account = merchants.model_connection(slug, expected_provider="openrouter")
+        if account is None:
+            raise OrderError(409, "model_account_unavailable", "Сначала подключите аккаунт OpenRouter.")
+        try:
+            models = merchants.model_options("openrouter", account.key)
+        except ValueError as error:
+            return dashboard(request, slug, session, error=str(error), status=400)
+        return dashboard(request, slug, session, account_models=models)
+
+    @router.post("/model/openrouter/select")
+    def select_account_model(
+        request: Request, token: Annotated[str, Form(max_length=128)], model: Annotated[str, Form(max_length=128)],
+    ):
+        slug, session, _ = model_account(request)
+        check_csrf(request, settings.origin, session, token)
+        with store.read() as db:
+            account = merchants.model_connection(slug, expected_provider="openrouter", db=db)
+            revision = merchants.model_revision(db, slug)
+        if account is None:
+            raise OrderError(409, "model_account_unavailable", "Сначала подключите аккаунт OpenRouter.")
+        try:
+            updated = merchants.connect_model(slug, "openrouter", model.strip(), account.key, expected_revision=revision)
+        except ValueError as error:
+            return dashboard(request, slug, session, error=str(error), status=400)
+        if not updated:
+            return dashboard(request, slug, session, error="Подключение модели уже изменилось.", status=409)
+        return RedirectResponse("/merchant?updated=model#model", status_code=303)
 
     @router.post("/model/options")
     def available_models(

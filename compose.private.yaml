@@ -31,6 +31,7 @@ services:
     environment:
       OAUTH2_PROXY_PROVIDER: oidc
       OAUTH2_PROXY_INSECURE_OIDC_SKIP_NONCE: "false"
+      OAUTH2_PROXY_API_ROUTES: '^/merchant/model/openrouter/callback\z'
       OAUTH2_PROXY_SCOPE: openid email profile
       OAUTH2_PROXY_PROVIDER_DISPLAY_NAME: Корпоративный аккаунт
       OAUTH2_PROXY_OIDC_ISSUER_URL: ${OIDC_ISSUER:?Set the trusted OIDC issuer}

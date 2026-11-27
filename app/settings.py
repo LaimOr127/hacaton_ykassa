@@ -28,6 +28,9 @@ class Settings:
     model_merchant_limit: int = 60
     model_instance_limit: int = 120
     model_parallel_limit: int = 8
+    openrouter_oauth: bool = False
+    openrouter_model: str = "openai/gpt-4.1-mini"
+    mcp_invoices: bool = False
 
     def __post_init__(self):
         origin = urlsplit(self.origin)
@@ -74,6 +77,8 @@ class Settings:
             and 1 <= self.model_parallel_limit <= 24
         ):
             raise ValueError("Проверьте порядок квот модели и предел параллельных запросов")
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,127}", self.openrouter_model):
+            raise ValueError("OPENROUTER_MODEL должен содержать идентификатор модели")
 
     @property
     def secure(self) -> bool:
@@ -106,4 +111,7 @@ class Settings:
             model_merchant_limit=int(os.getenv("MODEL_MERCHANT_LIMIT", "60")),
             model_instance_limit=int(os.getenv("MODEL_INSTANCE_LIMIT", "120")),
             model_parallel_limit=int(os.getenv("MODEL_PARALLEL_LIMIT", "8")),
+            openrouter_oauth=os.getenv("OPENROUTER_OAUTH_ENABLED") == "1",
+            openrouter_model=os.getenv("OPENROUTER_MODEL", "openai/gpt-4.1-mini"),
+            mcp_invoices=os.getenv("MCP_INVOICES_ENABLED") == "1",
         )

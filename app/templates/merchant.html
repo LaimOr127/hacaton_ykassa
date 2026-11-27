@@ -64,6 +64,33 @@
           {% elif model_connection %}
             <p>Сохранено подключение <strong>{{ model_providers.get(model_connection.provider, "Неизвестный провайдер") }}</strong> · {{ model_connection.model }}</p>
           {% endif %}
+          {% if openrouter_oauth %}
+          <form method="post" action="/merchant/model/openrouter" class="account-connect">
+            <input type="hidden" name="token" value="{{ csrf }}">
+            <button>Подключить аккаунт OpenRouter</button>
+            <p class="hint">Подтвердите доступ на сайте OpenRouter. Для {{ openrouter_model }} предложим лимит $1 на 7 дней.</p>
+          </form>
+          {% if model_available and model_connection and model_connection.provider == "openrouter" %}
+          <details{% if account_models is not none %} open{% endif %}>
+            <summary>Модель подключённого аккаунта</summary>
+            <form method="post" action="/merchant/model/openrouter/models">
+              <input type="hidden" name="token" value="{{ csrf }}">
+              <button class="secondary">Загрузить список моделей</button>
+            </form>
+            <form method="post" action="/merchant/model/openrouter/select">
+              <input type="hidden" name="token" value="{{ csrf }}">
+              <label for="account-model">Идентификатор модели</label>
+              <input id="account-model" name="model" value="{{ model_connection.model }}" list="account-model-options" maxlength="128" required>
+              <datalist id="account-model-options">
+                {% for model in account_models or [] %}<option value="{{ model }}"></option>{% endfor %}
+              </datalist>
+              <button class="secondary">Проверить и выбрать</button>
+            </form>
+          </details>
+          {% endif %}
+          {% endif %}
+          <details class="model-manual"{% if not openrouter_oauth or error %} open{% endif %}>
+          <summary>Подключение по API-ключу</summary>
           <p>Возьмите ключ в <a href="https://platform.openai.com/api-keys">кабинете OpenAI</a> или у администратора компании.
             При сохранении приложение отправит один проверочный запрос.</p>
           <form id="model-form" method="post" action="/merchant/model">
@@ -84,6 +111,7 @@
             <datalist id="model-options"></datalist>
             <button>{{ "Проверить и заменить" if model_connection and model_connection.provider != "disabled" else "Проверить и подключить" }}</button>
           </form>
+          </details>
         {% endif %}
         {% if mode == "live" and model_available %}
           <form method="post" action="/merchant/model/disconnect">
@@ -104,10 +132,10 @@
               <input type="hidden" name="token" value="{{ csrf }}">
               <input type="hidden" name="review_page" value="{{ review_page }}">
               {% if not review.known %}
-                <label for="payment-{{ review.id }}">Идентификатор платежа</label>
-                <input id="payment-{{ review.id }}" name="payment_id" required maxlength="128" autocomplete="off">
+                <label for="payment-{{ review.id }}">{{ "Идентификатор счёта" if review.kind == "invoice" else "Идентификатор платежа (если известен)" }}</label>
+                <input id="payment-{{ review.id }}" name="payment_id" {{ "required" if review.kind == "invoice" and not review.candidate else "" }} maxlength="128" autocomplete="off">
               {% endif %}
-              <button>Сверить с ЮKassa</button>
+              <button>{{ "Найти и сверить платёж" if not review.known and review.kind == "payment" else "Сверить с ЮKassa" }}</button>
             </form>
           </article>
         {% endfor %}
@@ -126,6 +154,17 @@
           <p class="pill">Симуляция</p><p>В этом режиме можно пройти оформление и подтвердить демонстрационную оплату.</p>
         {% elif connected %}
           <p class="pill paid">Токен сохранён</p>
+          <form method="post" action="/merchant/connection/tools">
+            <input type="hidden" name="token" value="{{ csrf }}">
+            <button class="secondary">Проверить инструменты ЮKassa</button>
+          </form>
+          {% if mcp_tools is not none %}
+          <ul class="catalog-list">
+            {% for label, available, disabled in mcp_tools %}
+            <li>{{ label }} <span class="hint">{{ "Нет доступа" if not available else "Отключено настройкой" if disabled else "Доступно" }}</span></li>
+            {% endfor %}
+          </ul>
+          {% endif %}
           {% if vault_ready %}
           <details>
             <summary>Заменить токен</summary>

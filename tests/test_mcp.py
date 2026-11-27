@@ -1,5 +1,6 @@
 import json
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -119,3 +120,57 @@ def test_transport_distinguishes_unsubmitted_create_and_invalid_read(monkeypatch
             provider.create(1000, "attempt-123")
     if failure == "read":
         assert not isinstance(recorded.value, gateway.PaymentNotSent)
+
+
+def test_invoice_cart_and_read_only_mcp_tools(monkeypatch):
+    calls = []
+    amount = {"value": "1590.00", "currency": "RUB"}
+    payment = {"id": "payment-found", "status": "succeeded", "amount": amount, "description": "Order attempt-1"}
+    refund = {"id": "refund-found", "payment_id": "payment-found", "status": "succeeded", "amount": amount}
+    invoice = {
+        "id": "invoice-1", "status": "pending", "amount": amount, "description": "Order attempt-1",
+        "url": "https://yookassa.ru/invoice/demo", "expires_at": gateway.utc_iso(1000 + gateway.INVOICE_LIFETIME),
+    }
+
+    class ToolSession:
+        async def list_tools(self):
+            return SimpleNamespace(tools=[SimpleNamespace(name=name) for name in gateway.YOO_TOOLS])
+
+        async def call_tool(self, name, arguments):
+            calls.append((name, arguments))
+            if name in {"create_invoice", "get_invoice"}:
+                result = invoice
+            elif name == "get_payments_list":
+                result = {"items": [payment]} if "next_cursor" in arguments else {
+                    "items": [{**payment, "id": "other", "status": "waiting_for_capture", "description": "Other"}],
+                    "next_cursor": "page-2",
+                }
+            elif name == "get_refunds_list":
+                result = {"items": [refund]}
+            else:
+                assert name == "get_refund"
+                result = refund
+            return SimpleNamespace(isError=False, structuredContent=result)
+
+    @asynccontextmanager
+    async def session(_):
+        yield ToolSession()
+
+    monkeypatch.setattr(gateway.YooKassa, "session", session)
+    provider = gateway.YooKassa("fixture-test-token")
+    assert provider.tools() == set(gateway.YOO_TOOLS)
+    snapshot = {"payable_kopecks": 159_000, "balance_kopecks": 371_000}
+    assert provider.create_invoice(snapshot, "attempt-1", "order-12345", 1000).confirmation_url == invoice["url"]
+    assert calls[0] == ("create_invoice", {
+        "amount": amount, "description": "Order attempt-1", "expires_at": invoice["expires_at"],
+        "cart": [{"description": "Предоплата за заказ #order-12", "price": amount, "quantity": 1}],
+    })
+    assert provider.get_invoice("invoice-1").id == "invoice-1"
+    assert provider.find_payment(1000, "attempt-1", 159_000) == "payment-found"
+    assert calls[2][1]["created_at_gte"] == gateway.utc_iso(880)
+    assert calls[3][1]["next_cursor"] == "page-2"
+    assert provider.list_refunds("payment-found")[0].id == provider.get_refund("refund-found").id
+    assert calls[4:] == [
+        ("get_refunds_list", {"payment_id": "payment-found", "limit": 100}),
+        ("get_refund", {"id": "refund-found"}),
+    ]
