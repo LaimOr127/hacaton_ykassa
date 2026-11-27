@@ -4,6 +4,7 @@ services:
     ports:
       - '127.0.0.1:8000:8000'
     environment:
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://127.0.0.1:8000}
       APP_MODE: ${APP_MODE:-simulated}
       DATABASE_PATH: /data/orders-${APP_MODE:-simulated}.sqlite3

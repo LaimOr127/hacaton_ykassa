@@ -119,6 +119,8 @@ class Settings:
 
     @classmethod
     def from_env(cls):
+        if "*" in [item.strip() for item in os.getenv("FORWARDED_ALLOW_IPS", "").split(",")]:
+            raise ValueError("FORWARDED_ALLOW_IPS должен перечислять только доверенные прокси.")
         return cls(
             db_path=os.getenv("DATABASE_PATH", str(Path("data") / "orders.sqlite3")),
             origin=os.getenv("PUBLIC_ORIGIN", "http://127.0.0.1:8000"),

@@ -32,7 +32,7 @@ def start_authorization(merchants, slug, owner):
     })
 
 
-def finish_authorization(merchants, slug, owner, state, code):
+def finish_authorization(merchants, slug, owner, state, code, *, guard=None):
     if not SESSION_TOKEN.fullmatch(state) or not code or len(code) > 2048:
         raise ValueError("Подключение прервано. Начните вход заново.")
     with merchants.store.transaction() as db:
@@ -57,5 +57,5 @@ def finish_authorization(merchants, slug, owner, state, code):
     except (httpx.HTTPError, KeyError, TypeError, ValueError) as error:
         raise ValueError("OpenRouter не подтвердил вход. Попробуйте подключиться заново.") from error
     return merchants.connect_model(
-        slug, "openrouter", merchants.settings.openrouter_model, key, expected_revision=attempt["revision"],
+        slug, "openrouter", merchants.settings.openrouter_model, key, expected_revision=attempt["revision"], guard=guard,
     )

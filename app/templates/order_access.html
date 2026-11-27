@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Доступ к заказу</title>
+  <link rel="stylesheet" href="/static/order.css">
+</head>
+<body>
+  <main>
+    <h1>Заказ недоступен</h1>
+    <p>Откройте заказ в браузере, где он был создан{% if show_account %}, или войдите в аккаунт владельца{% endif %}.</p>
+    <p><a href="/s/{{ slug|urlencode }}">Открыть витрину</a></p>
+    {% if show_account %}<p><a href="/account">{{ "Мои заказы" if signed_in else "Войти" }}</a></p>{% endif %}
+  </main>
+</body>
+</html>

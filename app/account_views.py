@@ -2,7 +2,6 @@ import json
 import re
 import secrets
 import smtplib
-import ssl
 import time
 from email.message import EmailMessage
 from typing import Annotated
@@ -15,6 +14,8 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from .accounts import ACCOUNT_AGE, account_required, active_account
+from .diagnostics import record_failure
+from .mail import smtp_connection
 from .orders import OrderError
 from .payment_documents import EMAIL
 from .session_security import SESSION_TOKEN, check_csrf, csrf, digest
@@ -154,23 +155,30 @@ def account_routes(accounts, templates, viewer, claim_guests, default_catalog):
         browser = from_browser(request, token)
         if not settings.mail_ready:
             raise OrderError(404, "login_unavailable", "Вход по почте ещё не настроен.")
+        email = email.strip()
         if not EMAIL.fullmatch(email) or len(email.split("@", 1)[0]) > 64:
             return page(request, error="Проверьте адрес почты.", status=400)
         name, domain = email.rsplit("@", 1)
-        recipient = f"{name}@{domain.lower()}"
-        subject = digest(recipient)
-        accounts.rate(request, "email:" + digest(recipient.casefold()))
-        state = accounts.flow(request, "email", browser, "", subject)
+        entered_address = f"{name}@{domain.lower()}"
+        recipient = entered_address.casefold()
+        accounts.rate(request, "email:" + digest(recipient))
+        if entered_address != recipient:
+            with store.read() as db:
+                legacy = db.execute(
+                    "SELECT 1 FROM account_identities WHERE provider = 'email' AND subject = ?", (digest(entered_address),),
+                ).fetchone()
+            if legacy:
+                recipient = entered_address
+        state = accounts.flow(request, "email", browser, "", digest(recipient))
         message = EmailMessage()
         message["From"], message["To"], message["Subject"] = settings.mail_from, recipient, "Вход в «Заказ из переписки»"
         url = settings.origin + "/account/email/confirm?" + urlencode({"state": state})
         message.set_content(f"Откройте ссылку в браузере, где запросили вход. Она действует десять минут.\n\n{url}")
         try:
-            with smtplib.SMTP_SSL(settings.mail_host, settings.mail_port, context=ssl.create_default_context(), timeout=8) as smtp:
-                if settings.mail_user:
-                    smtp.login(settings.mail_user, settings.mail_password)
+            with smtp_connection(settings) as smtp:
                 smtp.send_message(message)
-        except (OSError, ValueError, smtplib.SMTPException):
+        except (OSError, ValueError, smtplib.SMTPException) as error:
+            record_failure("", "smtp", "login_mail", "mail_failed", error)
             return page(request, error="Почтовый сервер не подтвердил отправку.", status=503)
         return page(request, notice="Ссылка отправлена. Откройте её в этом браузере в течение десяти минут.")
 

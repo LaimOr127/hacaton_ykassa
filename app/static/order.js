@@ -58,6 +58,9 @@ function describePayment() {
 }
 
 function paymentSelection() {
+  if (order?.status === "deposit_received") {
+    return {kind: "payment", parts: 1, tip_percent: 0, part_number: 1, balance_payment: true};
+  }
   const plan = order?.checkout;
   const kind = plan ? "payment" : byId("payment-kind")?.value ?? "payment";
   return {
@@ -86,9 +89,15 @@ function render() {
   byId("total").textContent = money(order?.total_kopecks ?? 0);
   byId("order-reference").hidden = !order?.id;
   byId("order-reference").textContent = order?.id ? `#${order.id.slice(0, 8)}` : "";
-  byId("deposit").hidden = !(order?.balance_kopecks > 0);
-  byId("deposit").textContent = order?.balance_kopecks > 0
-    ? `Сейчас ${money(order.payable_kopecks)}, остаток ${money(order.balance_kopecks)}` : "";
+  const balanceDue = order?.balance_kopecks > 0 && order.status !== "paid";
+  const balanceStep = order?.status === "deposit_received" || attempt?.balance_payment;
+  byId("deposit").hidden = !balanceDue;
+  byId("deposit").textContent = balanceDue
+    ? balanceStep ? `Остаток к оплате ${money(order.balance_kopecks)}`
+      : `Сейчас ${money(order.payable_kopecks)}, остаток ${money(order.balance_kopecks)}`
+    : "";
+  byId("refunded").hidden = !order?.refunded_kopecks;
+  byId("refunded").textContent = order?.refunded_kopecks ? `Возвращено ${money(order.refunded_kopecks)}` : "";
   const status = describePayment();
   if (byId("payment-status").textContent !== status) byId("payment-status").textContent = status;
   const stage = order?.status === "paid" || order?.status === "deposit_received" || attempt?.status === "unknown"
@@ -112,17 +121,18 @@ function render() {
   const plan = order?.checkout;
   const selection = paymentSelection();
   const continuation = plan && plan.paid_parts < plan.parts && finishedAttempt.has(attempt?.status);
-  const canPay = Boolean(order?.payable_kopecks && (!locked || continuation) && !review);
+  const canPay = Boolean(order?.payable_kopecks && (!locked || continuation || selection.balance_payment)
+    && !review && !order.refunded_kopecks);
   const kind = byId("payment-kind");
   if (kind) {
-    byId("payment-choice").hidden = !canPay || Boolean(plan);
+    byId("payment-choice").hidden = !canPay || Boolean(plan) || selection.balance_payment;
     kind.disabled = busy;
   }
   const controls = byId("checkout-options");
-  if (controls) controls.hidden = !canPay || Boolean(plan) || selection.kind !== "payment";
+  if (controls) controls.hidden = !canPay || Boolean(plan) || selection.balance_payment || selection.kind !== "payment";
   const base = order?.payable_kopecks ?? 0;
   const tip = plan?.tip_kopecks ?? Math.round(base * selection.tip_percent / 100);
-  const nextAmount = plan?.next_kopecks ?? Math.ceil((base + tip) / selection.parts);
+  const nextAmount = selection.balance_payment ? order.balance_kopecks : plan?.next_kopecks ?? Math.ceil((base + tip) / selection.parts);
   const progress = byId("split-progress");
   progress.hidden = !plan || plan.parts === 1;
   const progressText = plan ? `Оплачено долей: ${plan.paid_parts} из ${plan.parts}. Получено ${money(plan.paid_kopecks)}.` : "";
@@ -133,6 +143,7 @@ function render() {
   byId("pay").hidden = !canPay;
   byId("pay").disabled = busy;
   let payLabel = selection.kind === "invoice" ? "Выставить счёт на" : "Подтвердить и оплатить";
+  if (selection.balance_payment) payLabel = "Оплатить остаток";
   if (selection.parts > 1) payLabel = `Создать ссылку на долю ${selection.part_number} из ${selection.parts} ·`;
   byId("pay").textContent = base ? `${payLabel} ${money(nextAmount)}` : "Подтвердить заказ";
   byId("checkout").hidden = !attempt?.confirmation_url;
@@ -378,7 +389,9 @@ byId("new-order").addEventListener("click", () => run(async () => {
   attempt = null;
   lastDelta = "";
   lastMessage = undefined;
-  for (const id of ["payment-parts", "payment-tip"]) {
+  payKey = undefined;
+  if (byId("sample")) byId("sample").hidden = false;
+  for (const id of ["payment-kind", "payment-parts", "payment-tip"]) {
     const select = byId(id);
     if (select) select.selectedIndex = 0;
   }

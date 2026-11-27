@@ -13,6 +13,19 @@
   font-family: "Segoe UI", "Arial", sans-serif;
 }
 
+.store-menu { margin: 0 0 1rem; }
+.store-menu summary { cursor: pointer; font-weight: 650; }
+.store-menu-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: .6rem 1.25rem;
+  padding-inline-start: 1.25rem;
+}
+.store-menu-list > li { padding: .35rem 0; }
+.store-menu-list > li > span { display: block; }
+.store-menu-list ul { padding-inline-start: 1.25rem; }
+.store-menu-list span { font-variant-numeric: tabular-nums; }
+
 @media (prefers-color-scheme: dark) {
   :root {
     --canvas: #111c27;

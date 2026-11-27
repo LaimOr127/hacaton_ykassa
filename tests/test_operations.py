@@ -136,7 +136,14 @@ def test_production_model_adapter_rejects_amount_and_keeps_order_unchanged(tmp_p
             request=httpx.Request("POST", url),
         )
 
-    monkeypatch.setattr("app.agent.httpx.post", model_post)
+    original_post = httpx.Client.post
+
+    def send(client, url, *args, **kwargs):
+        if str(url).startswith("https://provider.example/"):
+            return model_post(url, *args, **kwargs)
+        return original_post(client, url, *args, **kwargs)
+
+    monkeypatch.setattr("app.agent.httpx.Client.post", send)
     settings = Settings(
         str(tmp_path / "adapter.sqlite3"), ORIGIN, mode="live", llm_key="fixture-key", llm_url="https://provider.example/v1",
     )

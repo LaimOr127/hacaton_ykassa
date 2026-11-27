@@ -1,12 +1,17 @@
 import json
 import re
 import time
+
+import anyio
 from uuid import uuid4
 
 from .checkout import checkout_flags, checkout_plan, portion
-from .gateway import INVOICE_LIFETIME, InvalidPaymentResponse, PaymentNotSent, payment_reference, trusted_checkout, utc_iso
+from .diagnostics import clear_failure, record_failure
+from .gateway import INVOICE_LIFETIME, InvalidPaymentResponse, McpBusy, PaymentNotSent, payment_reference, trusted_checkout, utc_iso
 from .orders import MESSAGE_LEASE_SECONDS, OrderError, check_version, checkout_review, lookup_order, quote_for
 from .storage import Store
+
+RECONCILE_INTERVAL = 5
 
 
 def public_attempt(row):
@@ -21,10 +26,13 @@ def public_attempt(row):
     shareable = row["state"] == "pending" and row["confirmation_url"]
     if row["kind"] == "invoice":
         result["kind"] = "invoice"
-        expires_at = row["created_at"] + INVOICE_LIFETIME
+        deadline = row["created_at"] + INVOICE_LIFETIME
+        expires_at = min(row["invoice_expires_at"] or deadline, deadline)
         if row["state"] == "pending":
             result["expires_at"] = utc_iso(expires_at)
         shareable = shareable and time.time() < expires_at
+    if row["balance_payment"]:
+        result["balance_payment"] = True
     if row["part_number"] is not None:
         result["part_number"] = row["part_number"]
     if shareable:
@@ -38,7 +46,7 @@ class Payments:
         self.catalog_for = catalog_for
         self.gateway_for = gateway_for
 
-    def reserve(self, session, order_id, key, version, kind, allow_invoice, parts, tip_percent, part_number):
+    def reserve(self, session, order_id, key, version, kind, allow_invoice, parts, tip_percent, part_number, balance_payment):
         with self.store.transaction() as db:
             order = lookup_order(db, session, order_id)
             old = db.execute(
@@ -47,13 +55,18 @@ class Payments:
             if old:
                 snapshot = json.loads(old["snapshot"])
                 if (
-                    old["order_version"] != version or old["kind"] != kind
+                    old["order_version"] != version or old["kind"] != kind or bool(old["balance_payment"]) != balance_payment
                     or (snapshot.get("parts", 1), snapshot.get("tip_percent", 0), old["part_number"] or 1)
                     != (parts, tip_percent, part_number)
                 ):
                     raise OrderError(409, "idempotency_conflict", "Ключ оплаты уже использован.")
                 return old, None
             check_version(order, version)
+            if db.execute(
+                """SELECT 1 FROM payment_refunds r JOIN attempts a ON a.id = r.attempt_id
+                   WHERE a.order_id = ? LIMIT 1""", (order_id,),
+            ).fetchone():
+                raise OrderError(409, "payment_refunded", "По заказу есть возврат. Уточните дальнейшую оплату у продавца.")
             checkout_review(db, order_id)
             if db.execute(
                 "SELECT 1 FROM messages WHERE order_id = ? AND result IS NULL AND started_at > ? LIMIT 1",
@@ -67,16 +80,22 @@ class Payments:
                 ).fetchone()
             ):
                 raise OrderError(409, "payment_in_progress", "У заказа уже есть активная попытка.")
-            if order["state"] not in {"draft", "agreed", "payment_pending"}:
-                raise OrderError(409, "order_not_payable", "Заказ уже оплачен.")
             snapshot = json.loads(order["quote"])
+            if balance_payment:
+                if (order["state"] != "deposit_received" or not snapshot["balance_kopecks"]
+                    or (kind, parts, tip_percent, part_number) != ("payment", 1, 0, 1)):
+                    raise OrderError(409, "order_not_payable", "Доплата доступна после предоплаты одним прямым платежом.")
+                snapshot.update(payable_kopecks=snapshot["balance_kopecks"], balance_kopecks=0)
+                plan = None
+            elif order["state"] not in {"draft", "agreed", "payment_pending"}:
+                raise OrderError(409, "order_not_payable", "Заказ уже оплачен.")
             if plan:
                 if (
                     kind != "payment" or parts != plan["parts"] or tip_percent != plan["tip_percent"]
                     or part_number != plan["paid_parts"] + 1
                 ):
                     raise OrderError(409, "checkout_changed", "Сверьте текущую долю и сумму оплаты.")
-            else:
+            elif not balance_payment:
                 quantities = json.loads(order["quantities"])
                 catalog = self.catalog_for(db, session["merchant"])
                 if not quantities.keys() <= catalog.products.keys():
@@ -93,7 +112,7 @@ class Payments:
             gateway = self.gateway_for(session["merchant"], db)
             if gateway is None:
                 raise OrderError(503, "payment_unavailable", "Продавец ещё не подключил оплату.")
-            if not plan:
+            if not plan and not balance_payment:
                 self.start_plan(db, session["merchant"], order_id, snapshot, kind, parts, tip_percent, part_number)
                 plan = checkout_plan(db, order_id)
             if plan:
@@ -101,9 +120,11 @@ class Payments:
                                 payable_kopecks=portion(plan["total_kopecks"], parts, part_number - 1))
             attempt_id = uuid4().hex
             db.execute(
-                """INSERT INTO attempts(id, order_id, request_key, order_version, snapshot, state, created_at, kind, part_number)
-                   VALUES (?, ?, ?, ?, ?, 'creating', ?, ?, ?)""",
-                (attempt_id, order_id, key, version, json.dumps(snapshot), int(time.time()), kind, part_number if plan else None),
+                """INSERT INTO attempts(id, order_id, request_key, order_version, snapshot, state, created_at,
+                                        kind, part_number, balance_payment)
+                   VALUES (?, ?, ?, ?, ?, 'creating', ?, ?, ?, ?)""",
+                (attempt_id, order_id, key, version, json.dumps(snapshot), int(time.time()), kind,
+                 part_number if plan else None, balance_payment),
             )
             db.execute(
                 "UPDATE orders SET state = 'payment_pending', agreed_version = ?, attempt_id = ? WHERE id = ?",
@@ -132,9 +153,12 @@ class Payments:
         )
 
     def create(
-        self, session, order_id, key, version, kind="payment", *, allow_invoice=False, parts=1, tip_percent=0, part_number=1,
+        self, session, order_id, key, version, kind="payment", *,
+        allow_invoice=False, parts=1, tip_percent=0, part_number=1, balance_payment=False,
     ):
-        attempt, gateway = self.reserve(session, order_id, key, version, kind, allow_invoice, parts, tip_percent, part_number)
+        attempt, gateway = self.reserve(
+            session, order_id, key, version, kind, allow_invoice, parts, tip_percent, part_number, balance_payment,
+        )
         if attempt is None:
             raise OrderError(409, "stale_version", "Цена изменилась. Подтвердите новый итог.", current_version=version + 1)
         if gateway is None:
@@ -144,49 +168,105 @@ class Payments:
                 payment = gateway.create_invoice(json.loads(attempt["snapshot"]), attempt["id"], order_id, attempt["created_at"])
             else:
                 payment = gateway.create(public_attempt(attempt)["amount_kopecks"], attempt["id"])
-        except PaymentNotSent:
+        except PaymentNotSent as error:
+            code = "payment_busy" if isinstance(error.__cause__, McpBusy) else "payment_not_sent"
+            record_failure(session["merchant"], "mcp", "create", code, error.__cause__)
             self.mark_failed(attempt)
         except InvalidPaymentResponse as error:
+            record_failure(session["merchant"], "mcp", "create", "payment_unknown", error)
             self.mark_unknown(attempt["id"], error.external_id)
-        except Exception:
-            # Запрос мог дойти до провайдера до обрыва соединения.
+        except Exception as error:
+            record_failure(session["merchant"], "mcp", "create", "payment_unknown", error)
             self.mark_unknown(attempt["id"])
         else:
-            self.record(attempt, payment, verified=False)
+            if not self.record(attempt, payment, verified=False):
+                record_failure(session["merchant"], "mcp", "create", "payment_unknown")
         with self.store.read() as db:
             return public_attempt(self.lookup(db, session, order_id, attempt["id"])), True
 
     def get(self, session, order_id, attempt_id):
+        with self.store.read() as db:
+            attempt = self.lookup(db, session, order_id, attempt_id)
+        if not self.can_refresh(attempt, int(time.time())):
+            return public_attempt(attempt)
+        self.refresh(session["merchant"], attempt_id)
+        with self.store.read() as db:
+            return public_attempt(self.lookup(db, session, order_id, attempt_id))
+
+    @staticmethod
+    def can_refresh(attempt, now):
+        if attempt["state"] == "creating":
+            return attempt["created_at"] + 30 <= now
+        return (
+            attempt["state"] in {"pending", "unknown"} and attempt["next_check"] <= now
+            and bool(attempt["external_id"] or attempt["candidate_id"])
+        )
+
+    def refresh(self, merchant, attempt_id, *, report_errors=False):
         now = int(time.time())
         with self.store.transaction() as db:
-            attempt = self.lookup(db, session, order_id, attempt_id)
-            if attempt["state"] == "creating" and attempt["created_at"] + 30 <= now:
+            attempt = db.execute(
+                """SELECT a.* FROM attempts a JOIN orders o ON a.order_id = o.id
+                   WHERE a.id = ? AND o.merchant = ?""", (attempt_id, merchant),
+            ).fetchone()
+            if attempt is None or not self.can_refresh(attempt, now):
+                return
+            if attempt["state"] == "creating":
                 db.execute("UPDATE attempts SET state = 'unknown' WHERE id = ?", (attempt_id,))
-                return public_attempt(self.lookup(db, session, order_id, attempt_id))
-            target = attempt["external_id"] or attempt["candidate_id"]
-            needs_check = (
-                attempt["state"] in {"pending", "unknown"} and target is not None
-                and attempt["next_check"] <= now
-            )
-            if needs_check:
-                db.execute("UPDATE attempts SET next_check = ? WHERE id = ?", (now + 20, attempt_id))
-        if needs_check:
-            gateway = self.gateway_for(session["merchant"])
+                return
+            lease = now + 45
+            db.execute("UPDATE attempts SET next_check = ? WHERE id = ?", (lease, attempt_id))
+        gateway = self.gateway_for(merchant)
+        target = attempt["external_id"] or attempt["candidate_id"]
+        try:
             if gateway is None:
-                return public_attempt(attempt)
-            try:
-                payment = self.read_external(gateway, attempt, target)
-                if payment.id != target:
-                    raise InvalidPaymentResponse()
-            except InvalidPaymentResponse:
-                self.mark_unknown(attempt_id)
-            except Exception:
-                pass
+                raise OrderError(503, "payment_unavailable", "Подключите ЮKassa для проверки оплаты.")
+            payment = self.read_external(gateway, attempt, target)
+            if payment.id != target:
+                raise InvalidPaymentResponse()
+        except InvalidPaymentResponse as error:
+            self.mark_unknown(attempt_id)
+            record_failure(merchant, "mcp", "check_status", "payment_status", error)
+            if report_errors:
+                raise OrderError(409, "payment_mismatch", "Ответ ЮKassa не совпал с попыткой. Откройте сверку.") from error
+        except Exception as error:
+            code = "payment_busy" if isinstance(error, McpBusy) else "payment_status"
+            record_failure(merchant, "mcp", "check_status", code, error)
+            with self.store.transaction() as db:
+                db.execute("UPDATE attempts SET next_check = ? WHERE id = ? AND next_check = ?",
+                           (int(time.time()) + (5 if report_errors else 10), attempt_id, lease))
+            if report_errors:
+                raise OrderError(503, "payment_unavailable", "ЮKassa не вернула статус. Проверьте подключение и повторите.") from error
+        else:
+            if self.record(attempt, payment, verified=True):
+                clear_failure(merchant, "mcp")
             else:
-                self.record(attempt, payment, verified=True)
-            with self.store.read() as db:
-                attempt = self.lookup(db, session, order_id, attempt_id)
-        return public_attempt(attempt)
+                record_failure(merchant, "mcp", "check_status", "payment_status")
+                if report_errors:
+                    raise OrderError(409, "payment_mismatch", "Ответ ЮKassa не совпал с попыткой. Откройте сверку.")
+
+    def due_attempts(self):
+        now = int(time.time())
+        with self.store.read() as db:
+            return db.execute(
+                """SELECT o.merchant, a.id FROM attempts a JOIN orders o ON a.id = o.attempt_id
+                   WHERE (
+                       a.state IN ('pending','unknown') AND a.next_check <= ?
+                       AND COALESCE(a.external_id, a.candidate_id) IS NOT NULL
+                   ) OR (a.state = 'creating' AND a.created_at <= ?)
+                   ORDER BY a.next_check, a.created_at LIMIT 4""", (now, now - 30),
+            ).fetchall()
+
+    async def watch_pending(self):
+        while True:
+            await anyio.sleep(RECONCILE_INTERVAL)
+            try:
+                due = await anyio.to_thread.run_sync(self.due_attempts)
+                async with anyio.create_task_group() as batch:
+                    for attempt in due:
+                        batch.start_soon(anyio.to_thread.run_sync, self.refresh, attempt["merchant"], attempt["id"])
+            except Exception as error:
+                record_failure("", "mcp", "watch_pending", "payment_worker", error)
 
     @staticmethod
     def read_external(gateway, attempt, external_id):
@@ -218,18 +298,21 @@ class Payments:
             attempt["state"] == "unknown" or attempt["external_id"] is None
         ) and payment.description != reference
         invoice = attempt["kind"] == "invoice"
+        invoice_expiry = None
+        if invoice and payment.expires_at and payment.expires_at.tzinfo is not None:
+            invoice_expiry = int(payment.expires_at.timestamp())
+        expected_expiry = attempt["created_at"] + INVOICE_LIFETIME
         invalid_invoice = invoice and (
             payment.description != reference
             or (payment.status == "pending" and (
-                payment.expires_at is None or payment.expires_at.tzinfo is None
-                or int(payment.expires_at.timestamp()) != attempt["created_at"] + INVOICE_LIFETIME
+                invoice_expiry is None or abs(invoice_expiry - expected_expiry) > 300
             ))
         )
         if payment.amount.currency != "RUB" or payment.kopecks != snapshot["payable_kopecks"] or (
             attempt["external_id"] and payment.id != attempt["external_id"]
         ) or wrong_reference or unconfirmed_reference or invalid_invoice:
             self.mark_unknown(attempt["id"], None if verified else payment.id)
-            return
+            return False
         try:
             checkout = trusted_checkout(payment.confirmation_url or attempt["confirmation_url"])
         except ValueError:
@@ -253,17 +336,21 @@ class Payments:
                     "UPDATE attempts SET state = 'unknown', confirmation_url = NULL WHERE id = ? AND state IN ('creating','pending','unknown')",
                     (attempt["id"],),
                 )
-                return
+                return False
             changed = db.execute(
                 """UPDATE attempts SET state = ?, external_id = ?, confirmation_url = ?, next_check = ?,
-                   settled_payment_id = ?, candidate_id = NULL, verified_at = ?
+                   settled_payment_id = ?, candidate_id = NULL, verified_at = ?,
+                   invoice_expires_at = COALESCE(?, invoice_expires_at)
                    WHERE id = ? AND state IN ('creating', 'pending', 'unknown')
                    AND (external_id IS NULL OR external_id = ?)""",
                 (local_status, payment.id, checkout, int(time.time()) + (2 if verified else 0), linked,
-                 int(time.time()) if local_status == "succeeded" else None, attempt["id"], payment.id),
+                 int(time.time()) if local_status == "succeeded" else None,
+                 min(invoice_expiry, expected_expiry) if invoice_expiry is not None else None,
+                 attempt["id"], payment.id),
             ).rowcount
             if changed and local_status in {"succeeded", "canceled"}:
                 self.finish_attempt(db, attempt, local_status == "succeeded")
+            return local_status != "unknown"
 
     @staticmethod
     def finish_attempt(db, attempt, paid):
@@ -278,7 +365,7 @@ class Payments:
             if plan["paid_parts"]:
                 return
             db.execute("DELETE FROM checkout_plans WHERE order_id = ?", (attempt["order_id"],))
-        order_state = "agreed"
+        order_state = "deposit_received" if attempt["balance_payment"] else "agreed"
         if paid:
             order_state = "deposit_received" if json.loads(attempt["snapshot"])["balance_kopecks"] else "paid"
         db.execute(
@@ -336,8 +423,12 @@ class Payments:
                 raise OrderError(404, "payment_not_found", "Платёжная попытка не найдена.")
             if attempt["state"] == "creating" and attempt["created_at"] + 30 <= int(time.time()):
                 db.execute("UPDATE attempts SET state = 'unknown' WHERE id = ?", (attempt_id,))
-            elif attempt["state"] != "unknown":
+            elif attempt["state"] not in {"pending", "unknown"}:
                 raise OrderError(409, "review_unavailable", "Эта попытка больше не требует сверки.")
+
+        if attempt["state"] == "pending":
+            self.refresh(merchant, attempt_id, report_errors=True)
+            return
 
         gateway = self.gateway_for(merchant)
         if gateway is None:
@@ -347,6 +438,7 @@ class Payments:
             try:
                 external_id = gateway.find_payment(attempt["created_at"], attempt_id, public_attempt(attempt)["amount_kopecks"])
             except Exception as error:
+                record_failure(merchant, "mcp", "find_payment", "payment_status", error)
                 raise OrderError(503, "payment_unavailable", "Список платежей ЮKassa недоступен для сверки.") from error
             if not external_id:
                 raise OrderError(409, "payment_mismatch", "Однозначного совпадения нет. Укажите платёж из кабинета ЮKassa.")
@@ -357,6 +449,7 @@ class Payments:
         try:
             payment = self.read_external(gateway, attempt, external_id)
         except Exception as error:
+            record_failure(merchant, "mcp", "reconcile", "payment_status", error)
             raise OrderError(503, "payment_unavailable", "ЮKassa не подтвердила платёж. Попытка остаётся на сверке.") from error
         if (
             payment.id != external_id
@@ -376,13 +469,13 @@ class Payments:
     def refunds(self, merchant, order_id, refund_id):
         with self.store.read() as db:
             attempts = db.execute(
-                """SELECT a.external_id, a.settled_payment_id, a.kind FROM attempts a
+                """SELECT a.id, a.external_id, a.settled_payment_id, a.kind FROM attempts a
                    JOIN orders o ON o.id = a.order_id
                    WHERE o.id = ? AND o.merchant = ? AND a.state = 'succeeded'""", (order_id, merchant),
             ).fetchall()
         if not attempts:
             raise OrderError(404, "payment_not_found", "Подтверждённый платёж для заказа не найден.")
-        payment_ids = {a["settled_payment_id"] if a["kind"] == "invoice" else a["external_id"] for a in attempts}
+        payment_ids = {a["settled_payment_id"] if a["kind"] == "invoice" else a["external_id"]: a["id"] for a in attempts}
         gateway = self.gateway_for(merchant)
         if None in payment_ids or "" in payment_ids or gateway is None:
             raise OrderError(503, "payment_unavailable", "Для проверки возвратов нужно подключение ЮKassa.")
@@ -397,9 +490,20 @@ class Payments:
                 selected = gateway.get_refund(refund_id)
                 if selected.id != refund_id or selected.payment_id != refunds[refund_id].payment_id or selected.amount.currency != "RUB":
                     raise OrderError(404, "refund_not_found", "Возврат по этому заказу не найден.")
-                return [selected]
-            return list(refunds.values())
+                refunds[refund_id] = selected
+            with self.store.transaction() as db:
+                for item in refunds.values():
+                    if item.status != "succeeded" or item.kopecks <= 0:
+                        continue
+                    attempt_id = payment_ids[item.payment_id]
+                    db.execute("INSERT OR IGNORE INTO payment_refunds VALUES (?, ?, ?)", (item.id, attempt_id, item.kopecks))
+                    saved = db.execute("SELECT attempt_id, amount_kopecks FROM payment_refunds WHERE id = ?", (item.id,)).fetchone()
+                    if (saved["attempt_id"], saved["amount_kopecks"]) != (attempt_id, item.kopecks):
+                        raise InvalidPaymentResponse()
+            clear_failure(merchant, "mcp")
+            return [refunds[refund_id]] if refund_id else list(refunds.values())
         except OrderError:
             raise
         except Exception as error:
+            record_failure(merchant, "mcp", "refunds", "payment_refunds", error)
             raise OrderError(503, "payment_unavailable", "ЮKassa не вернула сведения о возвратах. Повторите запрос.") from error

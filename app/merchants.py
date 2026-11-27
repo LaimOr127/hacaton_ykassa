@@ -8,12 +8,14 @@ import secrets
 import time
 from contextlib import nullcontext
 from dataclasses import asdict
+from threading import BoundedSemaphore
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
 
-from .agent import ModelAgent, ModelConnection
+from .agent import ModelAgent, ModelConnection, ModelFailure
 from .catalog import Catalog, Product
+from .diagnostics import clear_failure, record_failure
 from .gateway import YooKassa, payment_reference
 from .settings import Settings
 from .storage import Store
@@ -22,6 +24,7 @@ SLUG = re.compile(r"[a-z][a-z0-9-]{2,31}")
 SKU = re.compile(r"[a-zA-Z0-9_-]{1,40}")
 COLUMNS = ["sku", "title", "basis", "price_kopecks", "area_from", "area_to"]
 CURRENT_MODEL_REVISION = object()
+OWNER_HASH_LIMIT = BoundedSemaphore(4)
 CLEANING_CSV = """sku,title,basis,price_kopecks,area_from,area_to
 cleaning,Уборка квартиры,area,350000,1,50
 cleaning,Уборка квартиры,area,450000,51,70
@@ -84,7 +87,12 @@ def export_catalog(products: dict[str, Product]) -> str:
 
 def hash_code(code: str, salt: bytes | None = None) -> str:
     salt = salt if salt is not None else secrets.token_bytes(16)
-    digest = hashlib.scrypt(code.encode(), salt=salt, n=2**14, r=8, p=1)
+    if not OWNER_HASH_LIMIT.acquire(blocking=False):
+        raise ValueError("Сервис входа занят. Повторите запрос.")
+    try:
+        digest = hashlib.scrypt(code.encode(), salt=salt, n=2**14, r=8, p=1)
+    finally:
+        OWNER_HASH_LIMIT.release()
     return f"{salt.hex()}:{digest.hex()}"
 
 
@@ -92,6 +100,7 @@ class Merchants:
     def __init__(self, store: Store, settings: Settings, default: Catalog):
         self.store, self.settings, self.default = store, settings, default
         self.vault = Fernet(settings.vault_key.encode()) if settings.vault_key else None
+        self.mcp_pool = None
 
     def catalog(self, db, slug: str) -> Catalog | None:
         merchant = db.execute("SELECT name, catalog_json, deposit FROM merchants WHERE slug = ?", (slug,)).fetchone()
@@ -103,16 +112,16 @@ class Merchants:
             return Catalog(slug, merchant["name"], products, merchant["deposit"])
         return self.default if slug == self.default.merchant_id else None
 
-    def limit_auth(self, address: str) -> bool:
+    def limit_auth(self, address: str, slug: str) -> bool:
         now = int(time.time())
         with self.store.transaction() as db:
             db.execute("DELETE FROM auth_attempts WHERE attempted_at < ?", (now - 300,))
-            total, own = db.execute(
-                "SELECT count(*), count(CASE WHEN address = ? THEN 1 END) FROM auth_attempts", (address,),
-            ).fetchone()
-            if total >= 150 or own >= 20:
-                return False
-            db.execute("INSERT INTO auth_attempts VALUES (?, ?)", (address, now))
+            scopes = [("ip:" + address, 20), ("merchant:" + slug, 30)]
+            for scoped, limit in scopes:
+                count = db.execute("SELECT count(*) FROM auth_attempts WHERE address = ?", (scoped,)).fetchone()[0]
+                if count >= limit:
+                    return False
+            db.executemany("INSERT INTO auth_attempts VALUES (?, ?)", [(scoped, now) for scoped, _ in scopes])
             return True
 
     def register(self, slug: str, name: str, code: str, *, corporate: bool = False):
@@ -132,74 +141,81 @@ class Merchants:
             if not created:
                 raise ValueError("Этот адрес магазина уже занят.")
 
-    def valid_code(self, slug: str, code: str) -> bool:
+    def valid_code(self, slug: str, code: str) -> str | None:
         if not SLUG.fullmatch(slug) or not 16 <= len(code) <= 128:
-            return False
+            return None
         with self.store.read() as db:
             row = db.execute("SELECT owner_hash FROM merchants WHERE slug = ?", (slug,)).fetchone()
         saved = row["owner_hash"] if row else "0" * 32 + ":" + "0" * 128
         actual = hash_code(code, bytes.fromhex(saved.split(":")[0]))
-        return row is not None and hmac.compare_digest(saved, actual)
+        return saved if row is not None and hmac.compare_digest(saved, actual) else None
 
-    def publish(self, slug: str, csv_text: str, deposit: int, expected_version: int) -> bool:
+    def publish(self, slug: str, csv_text: str, deposit: int, expected_version: int, *, guard=None) -> bool:
         parsed = price_list(csv_text)
         if not 1 <= deposit <= 100:
             raise ValueError("Предоплата должна составлять от 1 до 100%.")
         with self.store.transaction() as db:
+            if guard:
+                guard(db)
             return db.execute(
                 """UPDATE merchants SET catalog_json = ?, deposit = ?, catalog_version = catalog_version + 1
                    WHERE slug = ? AND catalog_version = ?""",
                 (serialize(parsed), deposit, slug, expected_version),
             ).rowcount == 1
 
-    def connect(self, slug: str, token: str):
+    def connect(self, slug: str, token: str, *, recover=False, external_id="", guard=None):
         if self.vault is None:
             raise ValueError("На сервере требуется настройка хранилища токенов.")
         if not re.fullmatch(r"[!-~]{16,4096}", token):
-            raise ValueError("Проверьте формат токена тестового магазина.")
+            raise ValueError("Проверьте формат MCP-токена.")
+        if external_id and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", external_id):
+            raise ValueError("Проверьте ID платежа или счёта.")
         with self.store.read() as db:
             merchant = db.execute("SELECT mcp_ciphertext FROM merchants WHERE slug = ?", (slug,)).fetchone()
             if not merchant:
                 raise ValueError("Сначала создайте магазин.")
             previous = merchant["mcp_ciphertext"]
-            configured = bool(previous or (slug == self.default.merchant_id and self.settings.mcp_token))
-            self.require_settled_payments(db, slug)
-            anchor = db.execute(
-                """SELECT a.id, a.external_id, a.snapshot, a.kind FROM attempts a JOIN orders o ON o.id = a.order_id
-                   WHERE o.merchant = ? AND a.external_id IS NOT NULL AND a.state IN ('succeeded','canceled')
-                   ORDER BY a.created_at DESC, a.id DESC LIMIT 1""",
-                (slug,),
-            ).fetchone()
-        if configured and not anchor:
-            raise ValueError("Для смены токена нужен платёж с известным номером в этом магазине.")
-        if self.settings.mcp_token and hmac.compare_digest(token.encode(), self.settings.mcp_token.encode()):
+            if not recover:
+                self.require_settled_payments(db, slug)
+            anchor = self.payment_anchor(db, slug)
+        if previous and not anchor and not recover:
+            raise ValueError("Для плановой смены сохранённого токена нужен платёж из журнала. Для восстановления используйте отдельный режим.")
+        if slug != self.default.merchant_id and self.settings.mcp_token and hmac.compare_digest(token, self.settings.mcp_token):
             raise ValueError("Этот токен уже используется другим магазином.")
         try:
             candidate = YooKassa(token)
+            candidate.pool = self.mcp_pool
             ready = candidate.check()
             anchored_payment = None
+            reference_id = ""
             if ready and anchor:
-                read_anchor = candidate.get_invoice if anchor["kind"] == "invoice" else candidate.get
-                anchored_payment = read_anchor(anchor["external_id"])
+                reference_id = anchor["external_id"] or external_id or anchor["candidate_id"] or ""
+                if not reference_id and recover and anchor["kind"] == "payment":
+                    amount = json.loads(anchor["snapshot"])["payable_kopecks"]
+                    reference_id = candidate.find_payment(anchor["created_at"], anchor["id"], amount)
+                if reference_id:
+                    read_anchor = candidate.get_invoice if anchor["kind"] == "invoice" else candidate.get
+                    anchored_payment = read_anchor(reference_id)
         except Exception as error:
+            record_failure(slug, "mcp", "connect", "payment_token", error)
             raise ValueError("Не удалось проверить токен. Проверьте его и повторите попытку.") from error
         if not ready:
             raise ValueError("У магазина должны быть доступны создание и проверка платежей через MCP.")
         if anchor and (
-            anchored_payment.id != anchor["external_id"] or anchored_payment.amount.currency != "RUB"
+            anchored_payment is None or anchored_payment.id != reference_id or anchored_payment.amount.currency != "RUB"
             or anchored_payment.kopecks != json.loads(anchor["snapshot"])["payable_kopecks"]
             or anchored_payment.description != payment_reference(anchor["id"])
         ):
-            raise ValueError("Новый токен не подтвердил платёж этого магазина.")
+            record_failure(slug, "mcp", "connect", "payment_token")
+            raise ValueError("Новый токен не подтвердил платёж этого магазина. Проверьте ID операции.")
         encrypted = self.vault.encrypt(json.dumps([slug, token]).encode()).decode()
         fingerprint = hmac.new(self.settings.vault_key.encode(), b"merchant-mcp:" + token.encode(), "sha256").hexdigest()
         with self.store.transaction() as db:
-            self.require_settled_payments(db, slug)
-            if anchor is None and db.execute(
-                """SELECT 1 FROM attempts a JOIN orders o ON o.id = a.order_id
-                   WHERE o.merchant = ? AND a.external_id IS NOT NULL LIMIT 1""",
-                (slug,),
-            ).fetchone():
+            if guard:
+                guard(db)
+            if not recover:
+                self.require_settled_payments(db, slug)
+            if anchor is None and self.payment_anchor(db, slug):
                 raise ValueError("В журнале появился новый платёж. Повторите подключение.")
             if db.execute(
                 "SELECT 1 FROM merchants WHERE mcp_fingerprint = ? AND slug != ?", (fingerprint, slug),
@@ -211,6 +227,26 @@ class Merchants:
             ).rowcount
             if not changed:
                 raise ValueError("Подключение уже изменилось. Обновите кабинет и повторите действие.")
+            if recover:
+                if anchor and not anchor["external_id"] and reference_id:
+                    db.execute(
+                        """UPDATE attempts SET candidate_id = ? WHERE id = ? AND external_id IS NULL
+                           AND state IN ('unknown', 'pending')""", (reference_id, anchor["id"]),
+                    )
+                db.execute(
+                    """UPDATE attempts SET next_check = 0 WHERE state IN ('pending','unknown')
+                       AND order_id IN (SELECT id FROM orders WHERE merchant = ?)""", (slug,),
+                )
+        clear_failure(slug, "mcp")
+
+    @staticmethod
+    def payment_anchor(db, slug):
+        return db.execute(
+            """SELECT a.id, a.external_id, a.candidate_id, a.snapshot, a.kind, a.created_at
+               FROM attempts a JOIN orders o ON o.id = a.order_id
+               WHERE o.merchant = ? AND a.state != 'failed'
+               ORDER BY (a.external_id IS NOT NULL) DESC, a.created_at DESC, a.id DESC LIMIT 1""", (slug,),
+        ).fetchone()
 
     @staticmethod
     def require_settled_payments(db, slug):
@@ -219,7 +255,7 @@ class Merchants:
                WHERE o.merchant = ? AND a.state IN ('creating','pending','unknown') LIMIT 1""",
             (slug,),
         ).fetchone():
-            raise ValueError("Завершите оплату или сверку всех активных платежей перед заменой токена.")
+            raise ValueError("Завершите оплату или сверку активных платежей либо выберите восстановление токена.")
 
     def token(self, slug: str, db=None) -> str | None:
         with (self.store.read() if db is None else nullcontext(db)) as connection:
@@ -248,8 +284,10 @@ class Merchants:
             row = db.execute("SELECT provider, model FROM model_connectors WHERE merchant = ?", (slug,)).fetchone()
         return dict(row) if row else None
 
-    def disconnect_model(self, slug):
+    def disconnect_model(self, slug, *, guard=None):
         with self.store.transaction() as db:
+            if guard:
+                guard(db)
             db.execute(
                 """INSERT INTO model_connectors VALUES (?, 'disabled', '', ?) ON CONFLICT(merchant)
                    DO UPDATE SET provider='disabled', model='', ciphertext=excluded.ciphertext""",
@@ -279,7 +317,7 @@ class Merchants:
         row = db.execute("SELECT ciphertext FROM model_connectors WHERE merchant = ?", (slug,)).fetchone()
         return row["ciphertext"] if row else None
 
-    def connect_model(self, slug, provider, model, key, *, expected_revision=CURRENT_MODEL_REVISION):
+    def connect_model(self, slug, provider, model, key, *, expected_revision=CURRENT_MODEL_REVISION, guard=None):
         endpoint = self.model_providers().get(provider)
         if self.vault is None:
             raise ValueError("На сервере требуется настройка хранилища ключей.")
@@ -294,10 +332,17 @@ class Merchants:
         selected = ModelConnection(endpoint[1], model, key)
         try:
             ModelAgent.request(selected, self.default, {}, [], "Мне нужно уточнить условия заказа.")
+        except ModelFailure as error:
+            record_failure(slug, "llm", "connect", error.code)
+            raise ValueError(str(error)) from error
         except Exception as error:
+            record_failure(slug, "llm", "connect", "model_request_error", error)
             raise ValueError("Модель не ответила в нужном формате. Проверьте ключ, доступ и идентификатор модели.") from error
+        clear_failure(slug, "llm")
         ciphertext = self.vault.encrypt(json.dumps([slug, provider, endpoint[1], model, key]).encode()).decode()
         with self.store.transaction() as db:
+            if guard:
+                guard(db)
             return db.execute(
                 """INSERT INTO model_connectors VALUES (?, ?, ?, ?) ON CONFLICT(merchant)
                    DO UPDATE SET provider=excluded.provider, model=excluded.model, ciphertext=excluded.ciphertext
