@@ -25,7 +25,7 @@
 .pill { display: inline-block; padding: 3px 8px; border-radius: 6px; background: var(--reply); font-size: .92rem; margin: 0; }
 .pill.paid, .pill.deposit_received { font-weight: 700; color: var(--accent); }
 .pill.review { color: var(--error); font-weight: 700; }
-.merchant input:not([type=hidden]) {
+.merchant input:not([type=hidden]), .merchant select {
   font: inherit; color: var(--ink); background: var(--canvas); border: 1px solid var(--edge);
   border-radius: 6px; padding: 8px 10px; min-height: 44px; width: 100%;
 }

@@ -28,7 +28,7 @@ class Payments:
         self.catalog_for = catalog_for
         self.gateway_for = gateway_for
 
-    def reserve(self, session, order_id, key, version, connected):
+    def reserve(self, session, order_id, key, version):
         with self.store.transaction() as db:
             order = lookup_order(db, session, order_id)
             old = db.execute(
@@ -37,7 +37,7 @@ class Payments:
             if old:
                 if old["order_version"] != version:
                     raise OrderError(409, "idempotency_conflict", "Ключ оплаты уже использован.")
-                return old, False
+                return old, None
             check_version(order, version)
             checkout_review(db, order_id)
             if db.execute(
@@ -58,10 +58,11 @@ class Payments:
             except ValueError as error:
                 raise OrderError(409, "order_not_payable", str(error)) from error
             if repriced:
-                return None, False
+                return None, None
             if json.loads(order["quote"])["payable_kopecks"] <= 0:
                 raise OrderError(409, "order_not_payable", "Сначала добавьте позиции в заказ.")
-            if not connected:
+            gateway = self.gateway_for(session["merchant"], db)
+            if gateway is None:
                 raise OrderError(503, "payment_unavailable", "Продавец ещё не подключил оплату.")
             attempt_id = uuid4().hex
             db.execute(
@@ -73,14 +74,13 @@ class Payments:
                 "UPDATE orders SET state = 'payment_pending', agreed_version = ?, attempt_id = ? WHERE id = ?",
                 (version, attempt_id, order_id),
             )
-            return db.execute("SELECT * FROM attempts WHERE id = ?", (attempt_id,)).fetchone(), True
+            return db.execute("SELECT * FROM attempts WHERE id = ?", (attempt_id,)).fetchone(), gateway
 
     def create(self, session, order_id, key, version):
-        gateway = self.gateway_for(session["merchant"])
-        attempt, created = self.reserve(session, order_id, key, version, gateway is not None)
+        attempt, gateway = self.reserve(session, order_id, key, version)
         if attempt is None:
             raise OrderError(409, "stale_version", "Цена изменилась. Подтвердите новый итог.", current_version=version + 1)
-        if not created:
+        if gateway is None:
             return public_attempt(attempt), False
         try:
             payment = gateway.create(public_attempt(attempt)["amount_kopecks"], attempt["id"])

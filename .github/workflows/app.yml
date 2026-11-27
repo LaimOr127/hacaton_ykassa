@@ -18,9 +18,14 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-dev.txt
       - run: python -m pip install -r requirements-dev.txt
-      - run: python -m ruff check app tests
+      - run: python -m ruff check app tests scripts
       - run: node --check app/static/order.js
+      - run: node --check app/static/merchant.js
       - run: python -m pytest -q
+      - name: Audit pinned runtime dependencies
+        run: |
+          python -m pip install pip-audit==2.10.1
+          python -m pip_audit --no-deps --disable-pip -r requirements.txt
       - name: Build, start and exercise Compose
         run: |
           docker compose up --build -d --wait app
@@ -34,3 +39,32 @@ jobs:
       - name: Stop containers
         if: always()
         run: docker compose down
+      - name: Verify private container topology and anonymous rejection
+        env:
+          PUBLIC_ORIGIN: https://orders.example.test
+          OIDC_ISSUER: https://identity.example.test
+          OIDC_JWKS_URL: https://identity.example.test/jwks
+          OIDC_CLIENT_ID: fixture-client
+          OIDC_CLIENT_SECRET: fixture-client-secret
+          OIDC_COOKIE_SECRET: fixture-cookie-secret
+          OIDC_EMAIL_DOMAIN: example.test
+          OIDC_MERCHANTS_JSON: '{"owner":"coffee"}'
+        run: |
+          private() { docker compose -p private-check -f compose.yaml -f compose.private.yaml "$@"; }
+          trap 'private down' EXIT
+          private config --format json | python -c 'import json,sys; s=json.load(sys.stdin)["services"]; assert not s["app"].get("ports") and "swagger" not in s; assert json.loads(s["app"]["environment"]["OIDC_MERCHANTS_JSON"])=={"owner":"coffee"}; p=s["auth"]["ports"]; assert len(p)==1 and p[0]["host_ip"]=="127.0.0.1"'
+          private run --rm --no-deps auth --version
+          private up --build -d --wait app
+          private exec -T app python - <<'PY'
+          from urllib.error import HTTPError
+          from urllib.request import urlopen
+
+          origin = "http://127.0.0.1:8000"
+          assert urlopen(origin + "/healthz", timeout=5).status == 200
+          try:
+              urlopen(origin + "/merchant", timeout=5)
+          except HTTPError as err:
+              assert err.code == 401
+          else:
+              raise AssertionError("Private endpoint accepted anonymous request")
+          PY

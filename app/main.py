@@ -11,11 +11,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .agent import DemoAgent, ModelAgent
 from .catalog import COFFEE, Catalog
+from .corporate_identity import CorporateIdentity
 from .gateway import Simulator, YooKassa
 from .merchant_views import merchant_routes
 from .merchants import Merchants
@@ -23,7 +25,7 @@ from .orders import OrderError, Orders
 from .payments import Payments
 from .session_security import SESSION_TOKEN, check_csrf, csrf, digest
 from .settings import Settings
-from .storage import Store
+from .storage import Store, StoreBusy
 
 HERE = Path(__file__).resolve().parent
 STALE_AFTER = 7 * 24 * 60 * 60
@@ -43,19 +45,22 @@ class Message(Confirm):
 
 def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, agent=None, gateway=None):
     settings = settings or Settings.from_env()
+    identity = CorporateIdentity(settings) if settings.access == "private" else None
     store = Store(settings.db_path, settings.mode)
     merchants = Merchants(store, settings, catalog)
-    agent = agent if agent is not None else (DemoAgent() if settings.mode == "simulated" else ModelAgent(settings))
+    agent = agent if agent is not None else (
+        DemoAgent() if settings.mode == "simulated" else ModelAgent(settings, merchants.model_connection)
+    )
     if gateway is None and settings.mode == "simulated":
         gateway = Simulator(store)
 
-    def gateway_for(slug):
+    def gateway_for(slug, db=None):
         if gateway is not None:
             return gateway
-        token = merchants.token(slug)
+        token = merchants.token(slug, db)
         return YooKassa(token) if token else None
 
-    orders = Orders(store, merchants.catalog, agent)
+    orders = Orders(store, merchants.catalog, agent, settings)
     payments = Payments(store, merchants.catalog, gateway_for)
 
     @asynccontextmanager
@@ -76,6 +81,17 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
 
     @app.middleware("http")
     async def security_headers(request, call_next):
+        if identity is not None and request.url.path != "/healthz":
+            authorization = request.headers.get("Authorization", "")
+            scheme, _, token = authorization.partition(" ")
+            subject = await run_in_threadpool(identity.verify, token) if scheme.lower() == "bearer" else None
+            if subject is None:
+                return JSONResponse(
+                    {"code": "corporate_sign_in_required", "message": "Войдите через корпоративный аккаунт."},
+                    status_code=401, headers={"Cache-Control": "no-store"},
+                )
+            request.state.corporate_subject = subject
+            request.state.corporate_token = token
         if request.method == "POST":
             length = request.headers.get("content-length", "")
             if not length.isascii() or not length.isdecimal():
@@ -101,7 +117,16 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
     async def validation_error(_request, _error):
         return JSONResponse({"code": "invalid_request", "message": "Проверьте данные запроса."}, status_code=400)
 
-    def session_id(token, slug):
+    @app.exception_handler(StoreBusy)
+    async def write_overloaded(_request, _error):
+        return JSONResponse(
+            {"code": "storage_busy", "message": "Сервис занят. Повторите действие через несколько секунд."},
+            status_code=503, headers={"Retry-After": "2"},
+        )
+
+    def session_id(request, token, slug):
+        if identity is not None:
+            return digest(f"{len(request.state.corporate_subject)}:{request.state.corporate_subject}:{slug}:{token}")
         return digest(token if slug == catalog.merchant_id else f"{slug}:{token}")
 
     def customer_cookie(slug):
@@ -117,7 +142,7 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
         with store.read() as db:
             row = db.execute(
                 "SELECT * FROM sessions WHERE id = ? AND merchant = ? AND expires_at > ?",
-                (session_id(token, slug), slug, int(time.time())),
+                (session_id(request, token, slug), slug, int(time.time())),
             ).fetchone()
         if row is None:
             raise OrderError(401, "session_required", "Откройте страницу магазина заново.")
@@ -150,7 +175,7 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
             with store.transaction() as db:
                 db.execute(
                     "INSERT INTO sessions VALUES (?, ?, ?)",
-                    (session_id(token, slug), slug, int(time.time()) + STALE_AFTER),
+                    (session_id(request, token, slug), slug, int(time.time()) + STALE_AFTER),
                 )
             current = None
             transcript = []

@@ -25,6 +25,7 @@
     </div>
     <nav class="section-nav" aria-label="Разделы кабинета">
       <a href="#orders">Заказы</a><a href="#catalog">Прайс и предоплата</a><a href="#connection">Оплата</a>
+      <a href="#model">Языковая модель</a>
       {% if reviews or review_page > 1 %}<a href="#reviews">Сверка платежей</a>{% endif %}
     </nav>
     {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
@@ -48,6 +49,47 @@
           </table>
         {% else %}
           <p>Заказов пока нет. {% if catalog_ready %}Проверьте витрину как покупатель.{% else %}Загрузите прайс, чтобы открыть витрину.{% endif %}</p>
+        {% endif %}
+      </section>
+      <section class="workspace-panel" id="model" aria-labelledby="model-heading">
+        <h2 id="model-heading">Языковая модель</h2>
+        {% if mode == "simulated" %}
+          <p class="pill">Симуляция</p>
+          <p>Внешняя модель доступна в режиме подключения провайдеров.</p>
+        {% elif not vault_ready %}
+          <p>Администратору нужно настроить хранилище ключей.</p>
+        {% else %}
+          {% if model_connection and model_connection.provider == "disabled" %}
+            <p>Модель отключена для этого магазина.</p>
+          {% elif model_connection %}
+            <p>Сохранено подключение <strong>{{ model_providers.get(model_connection.provider, "Неизвестный провайдер") }}</strong> · {{ model_connection.model }}</p>
+          {% endif %}
+          <p>Возьмите ключ в <a href="https://platform.openai.com/api-keys">кабинете OpenAI</a> или у администратора компании.
+            При сохранении приложение отправит один проверочный запрос.</p>
+          <form id="model-form" method="post" action="/merchant/model">
+            <input type="hidden" name="token" value="{{ csrf }}">
+            <label for="model-provider">Провайдер</label>
+            <select id="model-provider" name="provider">
+              {% for id, name in model_providers.items() %}
+                <option value="{{ id }}" {% if model_connection and model_connection.provider == id %} selected{% endif %}>{{ name }}</option>
+              {% endfor %}
+            </select>
+            <label for="model-key">API-ключ модели</label>
+            <input id="model-key" name="api_key" type="password" required maxlength="4096" autocomplete="off">
+            <button id="load-models" type="button" class="secondary">Получить список моделей</button>
+            <p id="model-status" class="hint" role="status"></p>
+            <label for="model-id">Модель</label>
+            <input id="model-id" name="model" list="model-options" required maxlength="128" autocomplete="off" aria-describedby="model-status"
+              value="{{ model_connection.model if model_connection and model_connection.model else default_model }}">
+            <datalist id="model-options"></datalist>
+            <button>{{ "Проверить и заменить" if model_connection and model_connection.provider != "disabled" else "Проверить и подключить" }}</button>
+          </form>
+        {% endif %}
+        {% if mode == "live" and model_available %}
+          <form method="post" action="/merchant/model/disconnect">
+            <input type="hidden" name="token" value="{{ csrf }}">
+            <button class="secondary">Отключить модель</button>
+          </form>
         {% endif %}
       </section>
       {% if reviews or review_page > 1 %}
@@ -83,11 +125,23 @@
         {% if mode == 'simulated' %}
           <p class="pill">Симуляция</p><p>В этом режиме можно пройти оформление и подтвердить демонстрационную оплату.</p>
         {% elif connected %}
-          <p class="pill paid">Токен сохранён</p><p>Создайте пробный заказ, чтобы проверить прохождение оплаты.</p>
+          <p class="pill paid">Токен сохранён</p>
+          {% if vault_ready %}
+          <details>
+            <summary>Заменить токен</summary>
+            <p>Сначала завершите активные платежи и сверки. Новый токен должен видеть завершённый платёж этого магазина.</p>
+            <form method="post" action="/merchant/connection">
+              <input type="hidden" name="token" value="{{ csrf }}">
+              <label for="rotate-mcp">Новый MCP-токен</label>
+              <input id="rotate-mcp" type="password" name="mcp_token" required maxlength="4096" autocomplete="off">
+              <button>Проверить и заменить</button>
+            </form>
+          </details>
+          {% endif %}
         {% elif not vault_ready %}
           <p>Администратору сервера нужно настроить хранилище токенов.</p>
         {% else %}
-          <p>Используйте MCP-токен тестового магазина ЮKassa.</p>
+          <p>Создайте MCP-токен тестового магазина по <a href="https://yookassa.ru/developers/payment-acceptance/integration-scenarios/mcp-server/quick-start">инструкции ЮKassa</a> и вставьте его сюда.</p>
           <form method="post" action="/merchant/connection">
             <input type="hidden" name="token" value="{{ csrf }}">
             <label for="mcp-token">MCP-токен</label>

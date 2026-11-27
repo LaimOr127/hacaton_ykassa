@@ -12,6 +12,19 @@
   <main class="entry">
     <h1>Кабинет продавца</h1>
     {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+    {% if private %}
+    <section class="workspace-panel" aria-labelledby="activation">
+      <h2 id="activation">Настройте назначенную витрину</h2>
+      <p>Адрес магазина <strong>{{ assigned_slug }}</strong></p>
+      <form method="post" action="/merchant/register">
+        <input type="hidden" name="token" value="{{ csrf }}">
+        <input type="hidden" name="slug" value="{{ assigned_slug }}">
+        <label for="name">Название компании или магазина</label>
+        <input id="name" name="name" required maxlength="80" autocomplete="organization">
+        <button>Создать витрину</button>
+      </form>
+    </section>
+    {% else %}
     <div class="access-grid">
       <section class="workspace-panel" aria-labelledby="login-heading">
         <h2 id="login-heading">Войти в магазин</h2>
@@ -44,6 +57,7 @@
       </section>
       {% endif %}
     </div>
+    {% endif %}
   </main>
 </body>
 </html>

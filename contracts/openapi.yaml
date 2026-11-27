@@ -1,11 +1,12 @@
 openapi: 3.1.0
 info:
   title: Заказ из переписки
-  version: 0.3.0
+  version: 0.3.1
   description: |
     HTTP API покупателя. Примеры содержат вымышленные данные.
     Действия ЮKassa выполняются на сервере через MCP.
     Все ответы с данными сессии или заказа используют Cache-Control no-store.
+    В корпоративном режиме браузер сначала входит через внутренний OIDC-прокси.
 servers:
   - url: /api/v1
     description: Префикс API приложения
@@ -56,6 +57,7 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/StorageBusy'}
   /orders/{orderId}:
     parameters:
       - $ref: '#/components/parameters/Shop'
@@ -191,7 +193,9 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
         '503':
-          description: Результат обработки пока недоступен. Повторить с тем же client_message_id и телом.
+          description: Модель недоступна или сервер занят. Повторить с тем же client_message_id и телом.
+          headers:
+            Retry-After: {$ref: '#/components/headers/RetryAfterStorage'}
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -266,7 +270,9 @@ paths:
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
         '503':
-          description: Продавец ещё не подключил оплату.
+          description: Продавец ещё не подключил оплату или сервер занят. Повторить с тем же Idempotency-Key и телом.
+          headers:
+            Retry-After: {$ref: '#/components/headers/RetryAfterStorage'}
           content:
             application/json:
               schema: {$ref: '#/components/schemas/Error'}
@@ -308,6 +314,7 @@ paths:
                     currency: RUB
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/StorageBusy'}
 components:
   securitySchemes:
     CustomerSession:
@@ -342,11 +349,23 @@ components:
         Тот же ключ с изменённым телом даёт 409 idempotency_conflict.
       schema: {$ref: '#/components/schemas/ReplayKey'}
   headers:
+    RetryAfterStorage:
+      description: При коде storage_busy время в секундах, через которое можно повторить запрос.
+      schema: {type: integer, minimum: 1}
+      example: 2
     AttemptLocation:
       required: true
       schema: {type: string, format: uri-reference}
       example: /api/v1/orders/ord_coffee/payment-attempts/att_coffee
   responses:
+    StorageBusy:
+      description: Сервер занят. Повторить после Retry-After с прежним ключом и телом, если они были переданы.
+      headers:
+        Retry-After: {$ref: '#/components/headers/RetryAfterStorage'}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+          example: {code: storage_busy, message: Сервис занят. Повторите действие через несколько секунд.}
     BadRequest:
       description: Неверный запрос или отсутствует обязательное поле либо ключ повтора
       content:

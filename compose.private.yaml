@@ -1,0 +1,56 @@
+services:
+  app:
+    ports: !reset []
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    environment:
+      APP_ACCESS: private
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set the HTTPS origin for the private application}
+      OIDC_ISSUER: ${OIDC_ISSUER:?Set the trusted OIDC issuer}
+      OIDC_JWKS_URL: ${OIDC_JWKS_URL:?Set the issuer JWKS endpoint}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?Set the OIDC client ID}
+      OIDC_EMAIL_DOMAIN: ${OIDC_EMAIL_DOMAIN:?Set the authorized company email domain}
+      OIDC_MERCHANTS_JSON: ${OIDC_MERCHANTS_JSON:-}
+  swagger:
+    profiles: ["local-docs"]
+    ports: !reset []
+  auth:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.12.0@sha256:786bed0f000c0f8a7b31619244ebab02406a8856a4faf3f5fb1df61fbd6c30ed
+    ports:
+      - "127.0.0.1:4180:4180"
+    read_only: true
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      OAUTH2_PROXY_PROVIDER: oidc
+      OAUTH2_PROXY_INSECURE_OIDC_SKIP_NONCE: "false"
+      OAUTH2_PROXY_SCOPE: openid email profile
+      OAUTH2_PROXY_PROVIDER_DISPLAY_NAME: Корпоративный аккаунт
+      OAUTH2_PROXY_OIDC_ISSUER_URL: ${OIDC_ISSUER:?Set the trusted OIDC issuer}
+      OAUTH2_PROXY_CLIENT_ID: ${OIDC_CLIENT_ID:?Set the OIDC client ID}
+      OAUTH2_PROXY_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?Set the OIDC client secret}
+      OAUTH2_PROXY_COOKIE_SECRET: ${OIDC_COOKIE_SECRET:?Set the OAuth2 Proxy cookie secret}
+      OAUTH2_PROXY_EMAIL_DOMAINS: ${OIDC_EMAIL_DOMAIN:?Set the authorized company email domain}
+      OAUTH2_PROXY_REDIRECT_URL: ${PUBLIC_ORIGIN:?Set the HTTPS origin for the private application}/oauth2/callback
+      OAUTH2_PROXY_UPSTREAMS: http://app:8000/
+      OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+      OAUTH2_PROXY_REVERSE_PROXY: "true"
+      OAUTH2_PROXY_PASS_AUTHORIZATION_HEADER: "true"
+      OAUTH2_PROXY_PASS_ACCESS_TOKEN: "false"
+      OAUTH2_PROXY_PASS_USER_HEADERS: "false"
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      OAUTH2_PROXY_COOKIE_SECURE: "true"
+      OAUTH2_PROXY_COOKIE_SAMESITE: lax
+      OAUTH2_PROXY_COOKIE_EXPIRE: ${OIDC_COOKIE_EXPIRE:-5m}
+      OAUTH2_PROXY_REQUEST_LOGGING: "false"
+      OAUTH2_PROXY_AUTH_LOGGING: "false"
+    depends_on:
+      app:
+        condition: service_healthy
