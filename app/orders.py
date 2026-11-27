@@ -5,7 +5,7 @@ from uuid import uuid4
 import httpx
 from pydantic import ValidationError
 
-from .agent import ModelNotSent
+from .agent import ModelAgent, ModelNotSent
 from .catalog import Catalog
 from .storage import Store
 
@@ -136,6 +136,26 @@ class Orders:
         ).fetchone():
             raise OrderError(409, "seller_review_required", "Заказ у продавца. Дождитесь его ответа.")
 
+    def reserve_model_call(self, session, message_id, lease):
+        now = int(time.time())
+        with self.store.transaction() as db:
+            claim = db.execute("SELECT lease FROM messages WHERE id = ?", (message_id,)).fetchone()
+            if claim is None or claim["lease"] != lease:
+                raise OrderError(409, "request_in_progress", "Сообщение ещё обрабатывается.")
+            db.execute("DELETE FROM model_calls WHERE started_at < ?", (now - 3600,))
+            all_calls, own_calls, shop_calls = db.execute(
+                """SELECT COUNT(*), COUNT(CASE WHEN c.session_id = ? THEN 1 END),
+                   COUNT(CASE WHEN s.merchant = ? THEN 1 END)
+                   FROM model_calls c JOIN sessions s ON s.id = c.session_id""",
+                (session["id"], session["merchant"]),
+            ).fetchone()
+            if (
+                all_calls >= self.settings.model_instance_limit or shop_calls >= self.settings.model_merchant_limit
+                or own_calls >= self.settings.model_session_limit
+            ):
+                raise OrderError(429, "rate_limited", "Лимит сообщений исчерпан. Попробуйте позже.")
+            db.execute("INSERT INTO model_calls VALUES (?, ?, ?)", (lease, session["id"], now))
+
     def message(self, session, order_id, key, version, message):
         lease = uuid4().hex
         now = int(time.time())
@@ -160,20 +180,6 @@ class Orders:
                 (order_id,),
             ).fetchall()
             message_id = previous["id"] if previous else uuid4().hex
-            if self.store.mode == "live":
-                db.execute("DELETE FROM model_calls WHERE started_at < ?", (now - 3600,))
-                all_calls, own_calls, shop_calls = db.execute(
-                    """SELECT COUNT(*), COUNT(CASE WHEN c.session_id = ? THEN 1 END),
-                       COUNT(CASE WHEN s.merchant = ? THEN 1 END)
-                       FROM model_calls c JOIN sessions s ON s.id = c.session_id""",
-                    (session["id"], session["merchant"]),
-                ).fetchone()
-                if (
-                    all_calls >= self.settings.model_instance_limit or shop_calls >= self.settings.model_merchant_limit
-                    or own_calls >= self.settings.model_session_limit
-                ):
-                    raise OrderError(429, "rate_limited", "Лимит сообщений исчерпан. Попробуйте позже.")
-                db.execute("INSERT INTO model_calls VALUES (?, ?, ?)", (lease, session["id"], now))
             db.execute(
                 """INSERT INTO messages(id, order_id, request_key, base_version, text, lease, started_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(order_id, request_key)
@@ -183,12 +189,22 @@ class Orders:
             quantities = json.loads(row["quantities"])
             seller = db.execute("SELECT reply FROM seller_reviews WHERE order_id = ? AND closed_at IS NULL", (order_id,)).fetchone()
 
+        reserved = False
         not_sent = False
+
+        def reserve_quota():
+            nonlocal reserved
+            self.reserve_model_call(session, message_id, lease)
+            reserved = True
+
         try:
             context = [(r["text"][:300], json.loads(r["result"])["reply"][:250]) for r in reversed(recent)]
             if seller and seller["reply"]:
                 context.append(("", f"Ответ продавца: {seller['reply'][:400]}"))
-            proposal = self.agent.propose(catalog, quantities, context, message)
+            if isinstance(self.agent, ModelAgent):
+                proposal = self.agent.propose(catalog, quantities, context, message, before_send=reserve_quota)
+            else:
+                proposal = self.agent.propose(catalog, quantities, context, message)
             outcome, reply = proposal.outcome, proposal.reply
 
             with self.store.transaction() as db:
@@ -245,7 +261,7 @@ class Orders:
             raise OrderError(503, "agent_unavailable", "Ответ пока недоступен. Повторите сообщение.") from error
         finally:
             with self.store.transaction() as db:
-                if not_sent:
+                if reserved and not_sent:
                     db.execute("DELETE FROM model_calls WHERE call_id = ?", (lease,))
                 db.execute("DELETE FROM messages WHERE id = ? AND lease = ? AND result IS NULL", (message_id, lease))
 

@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import httpx
 import jwt
+import pytest
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
@@ -188,6 +189,32 @@ def test_missing_model_does_not_consume_model_quota(tmp_path, monkeypatch):
         assert response.status_code == 200
         assert client.post(url, json=message, headers=headers).status_code == 200
         assert client.post(url, json={**message, "client_message_id": str(uuid4())}, headers=headers).status_code == 429
+
+
+@pytest.mark.parametrize(("provider_failure", "retry_status"), [
+    (httpx.ConnectError, 200),
+    (httpx.ConnectTimeout, 200),
+    (httpx.ReadTimeout, 429),
+])
+def test_model_quota_retains_only_attempts_that_could_reach_provider(tmp_path, monkeypatch, provider_failure, retry_status):
+    settings = Settings(
+        str(tmp_path / "network-quota.sqlite3"), "https://example.test", mode="live", llm_key="fixture-key",
+        model_session_limit=1, model_merchant_limit=1, model_instance_limit=1,
+    )
+    failures = iter([provider_failure("fixture failure")])
+
+    def probe(*_):
+        if error := next(failures, None):
+            raise error
+        return Proposal(outcome="clarification", quantities={}, reply="Проверка")
+
+    monkeypatch.setattr("app.agent.ModelAgent.request", staticmethod(probe))
+    with TestClient(create_app(settings), base_url=settings.origin) as client:
+        headers, order = start(client, "coffee")
+        url = "/api/v1/orders/" + order["id"] + "/messages"
+        message = {"client_message_id": str(uuid4()), "order_version": order["version"], "text": "Есть кофе?"}
+        assert client.post(url, json=message, headers=headers).status_code == 503
+        assert client.post(url, json=message, headers=headers).status_code == retry_status
 
 
 def test_database_lock_returns_retryable_http_status(tmp_path):

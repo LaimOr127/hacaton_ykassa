@@ -56,7 +56,7 @@ class ModelAgent:
         self.connection_for = connection_for
         self.inflight = BoundedSemaphore(settings.model_parallel_limit)
 
-    def propose(self, catalog: Catalog, quantities: dict, recent: list, message: str) -> Proposal:
+    def propose(self, catalog: Catalog, quantities: dict, recent: list, message: str, *, before_send) -> Proposal:
         selected = self.connection_for(catalog.merchant_id) if self.connection_for else ModelConnection(
             self.settings.llm_url, self.settings.llm_model, self.settings.llm_key,
         )
@@ -65,7 +65,10 @@ class ModelAgent:
         if not self.inflight.acquire(blocking=False):
             raise ModelNotSent("Все подключения к модели заняты. Повторите запрос.")
         try:
+            before_send()
             return self.request(selected, catalog, quantities, recent, message)
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as error:
+            raise ModelNotSent("Не удалось соединиться с моделью. Повторите запрос.") from error
         finally:
             self.inflight.release()
 
