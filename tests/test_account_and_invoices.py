@@ -208,9 +208,12 @@ def test_old_payment_attempt_schema_is_preserved_on_migration(tmp_path):
     store.initialize()
     with store.transaction() as db:
         db.execute("DROP INDEX settled_invoice_payment")
+        db.execute("DROP INDEX paid_order_part")
         db.execute("ALTER TABLE attempts DROP COLUMN settled_payment_id")
         db.execute("ALTER TABLE attempts DROP COLUMN kind")
         db.execute("ALTER TABLE attempts DROP COLUMN candidate_id")
+        db.execute("ALTER TABLE attempts DROP COLUMN part_number")
+        db.execute("ALTER TABLE attempts DROP COLUMN verified_at")
         db.execute("INSERT INTO sessions VALUES ('prior-session', 'coffee', 100)")
         db.execute("INSERT INTO orders(id,session_id,merchant,create_key,quote) VALUES ('prior-order','prior-session','coffee','key','{}')")
         db.execute(
@@ -219,4 +222,6 @@ def test_old_payment_attempt_schema_is_preserved_on_migration(tmp_path):
         )
     Store(settings.db_path, "live").initialize()
     with store.read() as db:
-        assert tuple(db.execute("SELECT external_id, kind, settled_payment_id FROM attempts").fetchone()) == ("provider-id", "payment", None)
+        assert tuple(db.execute("SELECT external_id, kind, settled_payment_id, part_number, verified_at FROM attempts").fetchone()) == (
+            "provider-id", "payment", None, None, None,
+        )

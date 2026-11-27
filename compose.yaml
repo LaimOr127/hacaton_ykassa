@@ -21,6 +21,11 @@ services:
       OPENROUTER_OAUTH_ENABLED: ${OPENROUTER_OAUTH_ENABLED:-0}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-openai/gpt-4.1-mini}
       MCP_INVOICES_ENABLED: ${MCP_INVOICES_ENABLED:-0}
+      MAIL_SMTP_HOST: ${MAIL_SMTP_HOST:-}
+      MAIL_SMTP_PORT: ${MAIL_SMTP_PORT:-465}
+      MAIL_FROM: ${MAIL_FROM:-}
+      MAIL_SMTP_USER: ${MAIL_SMTP_USER:-}
+      MAIL_SMTP_PASSWORD: ${MAIL_SMTP_PASSWORD:-}
     volumes:
       - order_data:/data
     security_opt:

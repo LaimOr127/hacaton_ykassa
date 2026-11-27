@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Заказ из переписки
-  version: 0.4.0
+  version: 0.5.0
   description: |
     HTTP API покупателя. Примеры содержат вымышленные данные.
     Действия ЮKassa выполняются на сервере через MCP.
@@ -212,6 +212,9 @@ paths:
         По умолчанию создаётся прямой платёж. При kind invoice создаётся счёт,
         если этот способ включён в развёртывании. Оба способа используют одну
         активную попытку на заказ. Смена вида при повторе ключа даёт 409.
+        При прямой оплате можно указать число долей и процент чаевых, если это
+        разрешено магазином. Параметры фиксируются с первой попыткой. Номер
+        очередной доли берётся из checkout.paid_parts + 1 в карточке заказа.
         Для пустого заказа, нулевого платежа или уже завершённой оплаты
         возвращается 409 order_not_payable.
         Сервер проверяет актуальность цены и заказа. Если цены изменились, сервер
@@ -240,6 +243,9 @@ paths:
                   type: string
                   enum: [payment, invoice]
                   default: payment
+                parts: {type: integer, minimum: 1, maximum: 4, default: 1}
+                tip_percent: {type: integer, enum: [0, 5, 10, 15], default: 0}
+                part_number: {type: integer, minimum: 1, maximum: 4, default: 1}
             examples:
               coffee:
                 summary: Кофейня, подтверждение 7 350 ₽
@@ -322,6 +328,111 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}
         '503': {$ref: '#/components/responses/StorageBusy'}
+  /orders/{orderId}/documents:
+    parameters:
+      - $ref: '#/components/parameters/Shop'
+      - $ref: '#/components/parameters/OrderId'
+    get:
+      tags: [Payments]
+      operationId: listPaymentDocuments
+      summary: Получить список документов по подтверждённым платежам
+      security:
+        - CustomerSession: []
+      responses:
+        '200':
+          description: Доступные способы доставки и подтверждённые платежи
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [download, email, payments]
+                properties:
+                  download: {type: boolean}
+                  email: {type: boolean}
+                  payments:
+                    type: array
+                    items:
+                      type: object
+                      required: [attempt_id, part_number, has_receipt, amount_kopecks]
+                      properties:
+                        attempt_id: {$ref: '#/components/schemas/ResourceId'}
+                        part_number: {type: [integer, 'null']}
+                        has_receipt: {type: boolean}
+                        amount_kopecks: {$ref: '#/components/schemas/Kopecks'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /orders/{orderId}/documents/{attemptId}/{kind}:
+    parameters:
+      - $ref: '#/components/parameters/Shop'
+      - $ref: '#/components/parameters/OrderId'
+      - $ref: '#/components/parameters/DocumentAttempt'
+      - $ref: '#/components/parameters/DocumentKind'
+    get:
+      tags: [Payments]
+      operationId: downloadPaymentDocument
+      summary: Скачать документ по подтверждённому платежу
+      security:
+        - CustomerSession: []
+      responses:
+        '200':
+          description: Кассовый чек, приложенный продавцом, или справочное подтверждение оплаты
+          headers:
+            Content-Disposition:
+              schema: {type: string}
+          content:
+            application/pdf:
+              schema: {type: string, format: binary}
+            text/plain:
+              schema: {type: string}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /orders/{orderId}/documents/{attemptId}/{kind}/email:
+    parameters:
+      - $ref: '#/components/parameters/Shop'
+      - $ref: '#/components/parameters/OrderId'
+      - $ref: '#/components/parameters/DocumentAttempt'
+      - $ref: '#/components/parameters/DocumentKind'
+    post:
+      tags: [Payments]
+      operationId: emailPaymentDocument
+      summary: Отправить документ на адрес, указанный покупателем
+      security:
+        - CustomerSession: []
+          CsrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [recipient]
+              additionalProperties: false
+              properties:
+                recipient: {type: string, format: email, maxLength: 254}
+      responses:
+        '200':
+          description: SMTP принял или отклонил письмо, отправка ещё идёт либо её исход неизвестен
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: {type: string, enum: [accepted, sending, unknown, failed]}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429':
+          description: Сработал лимит отправки писем
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '503': {$ref: '#/components/responses/StorageBusy'}
 components:
   securitySchemes:
     CustomerSession:
@@ -346,6 +457,16 @@ components:
       in: path
       required: true
       schema: {$ref: '#/components/schemas/ResourceId'}
+    DocumentAttempt:
+      name: attemptId
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/ResourceId'}
+    DocumentKind:
+      name: kind
+      in: path
+      required: true
+      schema: {type: string, enum: [receipt, confirmation]}
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -416,7 +537,7 @@ components:
                 properties:
                   code:
                     type: string
-                    enum: [idempotency_conflict, request_in_progress, payment_in_progress, order_not_payable, order_locked, seller_review_required, invoice_unavailable]
+                    enum: [idempotency_conflict, request_in_progress, payment_in_progress, order_not_payable, order_locked, seller_review_required, invoice_unavailable, checkout_changed, checkout_option_unavailable]
                   message: {type: string}
           examples:
             stale_version:
@@ -487,7 +608,7 @@ components:
           description: Полная сумма по серверному снимку расчёта.
         payable_kopecks:
           $ref: '#/components/schemas/Kopecks'
-          description: Сумма текущего платежа. Для предоплаты округляется до копейки, половина вверх.
+          description: Сумма за заказ к оплате без чаевых и разделения. Для предоплаты округляется до копейки, половина вверх.
         balance_kopecks:
           $ref: '#/components/schemas/Kopecks'
           description: Полная сумма за вычетом предусмотренного платежа, независимо от статуса попытки.
@@ -497,6 +618,19 @@ components:
           anyOf:
             - {$ref: '#/components/schemas/ResourceId'}
             - {type: 'null'}
+        checkout:
+          type: object
+          description: Зафиксированные доли и чаевые при использовании дополнительных опций оплаты.
+          required: [parts, paid_parts, tip_percent, tip_kopecks, total_kopecks, paid_kopecks, remaining_kopecks, next_kopecks]
+          properties:
+            parts: {type: integer, minimum: 1, maximum: 4}
+            paid_parts: {type: integer, minimum: 0, maximum: 4}
+            tip_percent: {type: integer, enum: [0, 5, 10, 15]}
+            tip_kopecks: {$ref: '#/components/schemas/Kopecks'}
+            total_kopecks: {$ref: '#/components/schemas/Kopecks'}
+            paid_kopecks: {$ref: '#/components/schemas/Kopecks'}
+            remaining_kopecks: {$ref: '#/components/schemas/Kopecks'}
+            next_kopecks: {$ref: '#/components/schemas/Kopecks'}
         seller_review:
           description: Запрос продавцу. Пока поле присутствует, заказ ожидает уточнения перед оплатой.
           oneOf:
@@ -527,6 +661,7 @@ components:
       additionalProperties: false
       required: [id, order_id, order_version, amount_kopecks, currency, status]
       properties:
+        part_number: {type: integer, minimum: 1, maximum: 4}
         id: {$ref: '#/components/schemas/ResourceId'}
         order_id: {$ref: '#/components/schemas/ResourceId'}
         order_version: {$ref: '#/components/schemas/Version'}

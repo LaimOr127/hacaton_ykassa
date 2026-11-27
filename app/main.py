@@ -1,3 +1,4 @@
+import re
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -8,7 +9,7 @@ from uuid import UUID
 
 from fastapi import FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
@@ -17,11 +18,13 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .agent import DemoAgent, ModelAgent
 from .catalog import COFFEE, Catalog
+from .checkout import checkout_flags
 from .corporate_identity import CorporateIdentity
 from .gateway import Simulator, YooKassa
 from .merchant_views import merchant_routes
 from .merchants import Merchants
 from .orders import OrderError, Orders
+from .payment_documents import PDF_LIMIT, PaymentDocuments
 from .payments import Payments
 from .session_security import SESSION_TOKEN, check_csrf, csrf, digest
 from .settings import Settings
@@ -45,6 +48,14 @@ class Message(Confirm):
 
 class PaymentConfirm(Confirm):
     kind: Literal["payment", "invoice"] = "payment"
+    parts: int = Field(default=1, strict=True, ge=1, le=4)
+    tip_percent: int = Field(default=0, strict=True, ge=0, le=15)
+    part_number: int = Field(default=1, strict=True, ge=1, le=4)
+
+
+class DocumentEmail(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    recipient: str = Field(min_length=3, max_length=254)
 
 
 def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, agent=None, gateway=None):
@@ -66,6 +77,7 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
 
     orders = Orders(store, merchants.catalog, agent, settings)
     payments = Payments(store, merchants.catalog, gateway_for)
+    documents = PaymentDocuments(store, settings)
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -100,8 +112,13 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
             length = request.headers.get("content-length", "")
             if not length.isascii() or not length.isdecimal():
                 return JSONResponse({"code": "length_required", "message": "Укажите размер запроса."}, status_code=411)
-            limit = 80_000 if request.url.path == "/merchant/catalog" else 20_000
-            if len(length) > 5 or int(length) > limit:
+            if request.url.path == "/merchant/catalog":
+                limit = 80_000
+            elif re.fullmatch(r"/merchant/orders/[a-f0-9]{32}/receipts/[a-f0-9]{32}", request.url.path):
+                limit = PDF_LIMIT + 8192
+            else:
+                limit = 20_000
+            if len(length) > len(str(limit)) or int(length) > limit:
                 return JSONResponse({"code": "request_too_large", "message": "Запрос слишком длинный."}, status_code=413)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
@@ -171,6 +188,7 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
             view_catalog = merchants.catalog(db, slug)
             if view_catalog is None:
                 raise OrderError(404, "shop_not_found", "Магазин ещё не опубликовал витрину.")
+            features = checkout_flags(db, slug)
         cookie_name = customer_cookie(slug)
         token = request.cookies.get(cookie_name, "")
         try:
@@ -200,6 +218,7 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
             {
                 "title": view_catalog.title, "csrf": csrf(token), "mode": settings.mode, "slug": slug,
                 "invoices": settings.mode == "live" and settings.mcp_invoices and bool(merchants.token(slug)),
+                "checkout_features": features, "mail_ready": settings.mail_ready,
                 "coffee_example": slug == "coffee" and {"breakfast", "vegetarian"} <= view_catalog.products.keys(),
                 "cleaning_example": {item.basis for item in view_catalog.products.values()} >= {"area", "fixed"}
                 and {"cleaning", "oven"} <= view_catalog.products.keys(),
@@ -232,6 +251,7 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
         attempt, created = payments.create(
             session(request, write=True), order_id, str(key), body.order_version, body.kind,
             allow_invoice=settings.mode == "live" and settings.mcp_invoices,
+            parts=body.parts, tip_percent=body.tip_percent, part_number=body.part_number,
         )
         location = f"{API}/orders/{order_id}/payment-attempts/{attempt['id']}"
         return JSONResponse(attempt, status_code=201 if created else 200, headers={"Location": location})
@@ -239,6 +259,29 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
     @app.get(API + "/orders/{order_id}/payment-attempts/{attempt_id}")
     def attempt_status(request: Request, order_id: str, attempt_id: str):
         return payments.get(session(request), order_id, attempt_id)
+
+    @app.get(API + "/orders/{order_id}/documents")
+    def order_documents(request: Request, order_id: str):
+        return documents.list(session(request), order_id)
+
+    @app.get(API + "/orders/{order_id}/documents/{attempt_id}/{kind}")
+    def download_document(request: Request, order_id: str, attempt_id: str, kind: Literal["receipt", "confirmation"]):
+        return document_response(session(request), order_id, attempt_id, kind)
+
+    @app.get("/s/{slug}/orders/{order_id}/documents/{attempt_id}/{kind}")
+    def storefront_document(request: Request, slug: str, order_id: str, attempt_id: str, kind: Literal["receipt", "confirmation"]):
+        return document_response(session(request, slug=slug), order_id, attempt_id, kind)
+
+    def document_response(buyer, order_id, attempt_id, kind):
+        content, filename, media = documents.download(buyer, order_id, attempt_id, kind)
+        return Response(content, media_type=media, headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+    @app.post(API + "/orders/{order_id}/documents/{attempt_id}/{kind}/email")
+    def send_document(
+        request: Request, order_id: str, attempt_id: str, kind: Literal["receipt", "confirmation"], body: DocumentEmail,
+        key: Annotated[UUID, Header(alias="Idempotency-Key")],
+    ):
+        return documents.send(session(request, write=True), order_id, attempt_id, kind, body.recipient, str(key))
 
     if settings.mode == "simulated":
         @app.post("/demo/orders/{order_id}/payment-attempts/{attempt_id}/approve")

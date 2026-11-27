@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from .agent import ModelAgent, ModelNotSent
 from .catalog import Catalog
+from .checkout import checkout_plan, public_plan
 from .storage import Store
 
 MESSAGE_LEASE_SECONDS = 30
@@ -38,6 +39,9 @@ def public_order(db, row):
         **json.loads(row["quote"]),
     }
     review = db.execute("SELECT reply FROM seller_reviews WHERE order_id = ? AND closed_at IS NULL", (row["id"],)).fetchone()
+    plan = checkout_plan(db, row["id"])
+    if plan:
+        data["checkout"] = public_plan(plan)
     if review:
         data["seller_review"] = {"status": "answered", "reply": review["reply"]} if review["reply"] else {"status": "pending"}
     if db.execute("SELECT 1 FROM fulfilled_orders WHERE order_id = ?", (row["id"],)).fetchone():

@@ -38,6 +38,24 @@ CREATE TABLE IF NOT EXISTS orders (
     UNIQUE (session_id, create_key)
 );
 CREATE INDEX IF NOT EXISTS merchant_orders ON orders(merchant, state);
+CREATE TABLE IF NOT EXISTS checkout_settings (
+    merchant TEXT PRIMARY KEY REFERENCES merchants(slug),
+    split_payments INTEGER NOT NULL, tips INTEGER NOT NULL,
+    receipt_download INTEGER NOT NULL, receipt_email INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS checkout_plans (
+    order_id TEXT PRIMARY KEY REFERENCES orders(id),
+    parts INTEGER NOT NULL CHECK (parts BETWEEN 1 AND 4),
+    tip_percent INTEGER NOT NULL CHECK (tip_percent IN (0, 5, 10, 15)),
+    tip_kopecks INTEGER NOT NULL CHECK (tip_kopecks >= 0),
+    total_kopecks INTEGER NOT NULL CHECK (total_kopecks > 0),
+    paid_parts INTEGER NOT NULL DEFAULT 0 CHECK (paid_parts BETWEEN 0 AND parts)
+);
+CREATE TRIGGER IF NOT EXISTS prevent_incomplete_checkout
+    BEFORE UPDATE OF state ON orders
+    WHEN OLD.state = 'payment_pending' AND NEW.state != 'payment_pending'
+         AND EXISTS (SELECT 1 FROM checkout_plans WHERE order_id = OLD.id AND paid_parts < parts)
+    BEGIN SELECT RAISE(ABORT, 'checkout plan incomplete'); END;
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY, order_id TEXT NOT NULL REFERENCES orders(id),
     request_key TEXT NOT NULL, base_version INTEGER NOT NULL, text TEXT NOT NULL,
@@ -63,11 +81,22 @@ CREATE TABLE IF NOT EXISTS attempts (
     state TEXT NOT NULL, external_id TEXT UNIQUE, confirmation_url TEXT,
     created_at INTEGER NOT NULL, next_check INTEGER NOT NULL DEFAULT 0,
     kind TEXT NOT NULL DEFAULT 'payment' CHECK (kind IN ('payment','invoice')),
-    settled_payment_id TEXT, candidate_id TEXT,
+    settled_payment_id TEXT, candidate_id TEXT, part_number INTEGER, verified_at INTEGER,
     UNIQUE (order_id, request_key)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS active_payment ON attempts(order_id)
     WHERE state IN ('creating', 'pending', 'unknown');
+CREATE TABLE IF NOT EXISTS payment_receipts (
+    attempt_id TEXT PRIMARY KEY REFERENCES attempts(id), pdf BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS receipt_deliveries (
+    request_key TEXT NOT NULL, order_id TEXT NOT NULL REFERENCES orders(id),
+    attempt_id TEXT NOT NULL REFERENCES attempts(id), recipient_hash TEXT NOT NULL, document_kind TEXT NOT NULL, document_hash TEXT NOT NULL,
+    created_at INTEGER NOT NULL, state TEXT NOT NULL,
+    PRIMARY KEY (order_id, request_key)
+);
+CREATE INDEX IF NOT EXISTS receipt_delivery_time ON receipt_deliveries(created_at);
+CREATE INDEX IF NOT EXISTS receipt_delivery_document ON receipt_deliveries(attempt_id, recipient_hash, document_kind, document_hash);
 CREATE TABLE IF NOT EXISTS demo_payments (
     id TEXT PRIMARY KEY, amount_kopecks INTEGER NOT NULL,
     state TEXT NOT NULL DEFAULT 'pending'
@@ -107,7 +136,13 @@ class Store:
                 db.execute("ALTER TABLE attempts ADD COLUMN settled_payment_id TEXT")
             if "candidate_id" not in fields:
                 db.execute("ALTER TABLE attempts ADD COLUMN candidate_id TEXT")
+            if "part_number" not in fields:
+                db.execute("ALTER TABLE attempts ADD COLUMN part_number INTEGER")
+            if "verified_at" not in fields:
+                db.execute("ALTER TABLE attempts ADD COLUMN verified_at INTEGER")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS settled_invoice_payment ON attempts(settled_payment_id)")
+            db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS paid_order_part ON attempts(order_id, part_number)
+                          WHERE state = 'succeeded' AND part_number IS NOT NULL""")
             self.backfill_reviews(db)
 
     @staticmethod

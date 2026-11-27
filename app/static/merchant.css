@@ -37,6 +37,16 @@
 .merchant form .hint { margin: 0; }
 .account-connect { padding: 12px; background: var(--reply); border-radius: 8px; }
 .model-manual { margin-top: 18px; }
+.switch-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 19rem), 1fr)); gap: 8px 16px; margin-bottom: 8px; }
+.checkout-option { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; background: var(--reply); border-radius: 8px; cursor: pointer; }
+.checkout-option small { display: block; font-weight: 400; color: var(--muted); }
+.merchant input.checkout-switch[type=checkbox] {
+  appearance: none; width: 46px; min-height: 26px; height: 26px; padding: 2px; margin: 0; flex: none;
+  border-radius: 999px; border: 1px solid var(--muted); background: var(--panel); cursor: pointer;
+}
+.checkout-switch::before { content: ""; display: block; width: 20px; height: 20px; border-radius: 50%; background: var(--muted); }
+.merchant input.checkout-switch:checked { border-color: var(--accent); background: var(--accent); }
+.checkout-switch:checked::before { margin-inline-start: 19px; background: var(--on-accent); }
 .merchant .entry { max-width: 850px; }
 .merchant .access-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .error, .notice { padding: 10px 14px; background: var(--reply); border-inline-start: 3px solid currentColor; }

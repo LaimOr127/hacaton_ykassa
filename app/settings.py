@@ -31,6 +31,11 @@ class Settings:
     openrouter_oauth: bool = False
     openrouter_model: str = "openai/gpt-4.1-mini"
     mcp_invoices: bool = False
+    mail_host: str = ""
+    mail_port: int = 465
+    mail_from: str = ""
+    mail_user: str = ""
+    mail_password: str = field(default="", repr=False)
 
     def __post_init__(self):
         origin = urlsplit(self.origin)
@@ -79,6 +84,14 @@ class Settings:
             raise ValueError("Проверьте порядок квот модели и предел параллельных запросов")
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.:/-]{0,127}", self.openrouter_model):
             raise ValueError("OPENROUTER_MODEL должен содержать идентификатор модели")
+        if not 1 <= self.mail_port <= 65535 or bool(self.mail_user) != bool(self.mail_password) or any(
+            separator in self.mail_from for separator in "\r\n"
+        ):
+            raise ValueError("Проверьте порт, отправителя и учётные данные SMTP")
+
+    @property
+    def mail_ready(self) -> bool:
+        return self.mode == "live" and bool(self.mail_host and self.mail_from)
 
     @property
     def secure(self) -> bool:
@@ -114,4 +127,9 @@ class Settings:
             openrouter_oauth=os.getenv("OPENROUTER_OAUTH_ENABLED") == "1",
             openrouter_model=os.getenv("OPENROUTER_MODEL", "openai/gpt-4.1-mini"),
             mcp_invoices=os.getenv("MCP_INVOICES_ENABLED") == "1",
+            mail_host=os.getenv("MAIL_SMTP_HOST", ""),
+            mail_port=int(os.getenv("MAIL_SMTP_PORT", "465")),
+            mail_from=os.getenv("MAIL_FROM", ""),
+            mail_user=os.getenv("MAIL_SMTP_USER", ""),
+            mail_password=os.getenv("MAIL_SMTP_PASSWORD", ""),
         )
