@@ -11,6 +11,7 @@
   <body data-mode="{{ mode }}" data-shop="{{ slug }}" data-order="{{ order.id if order else '' }}">
     <header class="masthead">
       <a href="/s/{{ slug }}" class="brand">{{ title }}</a>
+      {% if account_link %}<a href="/account">{{ "Мои заказы" if signed_in else "Войти" }}</a>{% endif %}
       {% if mode == "simulated" %}<span class="mode">Симуляция оплаты</span>{% endif %}
     </header>
     <main>

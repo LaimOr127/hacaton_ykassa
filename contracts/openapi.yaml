@@ -1,12 +1,13 @@
 openapi: 3.1.0
 info:
   title: Заказ из переписки
-  version: 0.5.0
+  version: 0.6.0
   description: |
     HTTP API покупателя. Примеры содержат вымышленные данные.
     Действия ЮKassa выполняются на сервере через MCP.
     Все ответы с данными сессии или заказа используют Cache-Control no-store.
     В корпоративном режиме браузер сначала входит через внутренний OIDC-прокси.
+    В режиме личных аккаунтов привязанные заказы доступны с других устройств после входа.
 servers:
   - url: /api/v1
     description: Префикс API приложения
@@ -28,6 +29,8 @@ paths:
         У черновика версия 1 и нулевые суммы. Повтор возвращает исходный ответ 201.
       security:
         - CustomerSession: []
+          CsrfToken: []
+        - AccountSession: []
           CsrfToken: []
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -69,6 +72,7 @@ paths:
       description: Доступна сессии покупателя, создавшей заказ.
       security:
         - CustomerSession: []
+        - AccountSession: []
       responses:
         '200':
           description: Текущее состояние заказа
@@ -115,6 +119,8 @@ paths:
         Устаревшая версия даёт 409 stale_version без применения правки.
       security:
         - CustomerSession: []
+          CsrfToken: []
+        - AccountSession: []
           CsrfToken: []
       requestBody:
         required: true
@@ -227,6 +233,8 @@ paths:
       security:
         - CustomerSession: []
           CsrfToken: []
+        - AccountSession: []
+          CsrfToken: []
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -307,6 +315,7 @@ paths:
         Пока результат unknown, клиент читает этот ресурс и ждёт сверки.
       security:
         - CustomerSession: []
+        - AccountSession: []
       responses:
         '200':
           description: Сохранённое состояние платёжной попытки
@@ -338,6 +347,7 @@ paths:
       summary: Получить список документов по подтверждённым платежам
       security:
         - CustomerSession: []
+        - AccountSession: []
       responses:
         '200':
           description: Доступные способы доставки и подтверждённые платежи
@@ -373,6 +383,7 @@ paths:
       summary: Скачать документ по подтверждённому платежу
       security:
         - CustomerSession: []
+        - AccountSession: []
       responses:
         '200':
           description: Кассовый чек, приложенный продавцом, или справочное подтверждение оплаты
@@ -399,6 +410,8 @@ paths:
       summary: Отправить документ на адрес, указанный покупателем
       security:
         - CustomerSession: []
+          CsrfToken: []
+        - AccountSession: []
           CsrfToken: []
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -440,6 +453,11 @@ components:
       in: cookie
       name: __Host-customer_session
       description: Непрозрачный идентификатор серверной сессии покупателя. Привязан к магазину и заказам этой сессии.
+    AccountSession:
+      type: apiKey
+      in: cookie
+      name: __Host-account_session
+      description: Сессия личного аккаунта. Откройте витрину для получения CSRF и доступа к заказам аккаунта в этом магазине.
     CsrfToken:
       type: apiKey
       in: header

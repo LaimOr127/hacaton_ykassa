@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ "Мои заказы" if logged_in else "Вход" }} · Заказ из переписки</title>
+  <link rel="stylesheet" href="/static/order.css">
+  <link rel="stylesheet" href="/static/merchant.css">
+  {% if providers %}<script src="/static/account.js" defer></script>{% endif %}
+</head>
+<body class="merchant">
+  <header class="masthead">
+    <a class="brand" href="/">Заказ из переписки</a>
+    {% if logged_in %}<a href="/merchant">Кабинет продавца</a>{% endif %}
+  </header>
+  <main>
+    <h1>{{ "Мои заказы" if logged_in else "Войти" }}</h1>
+    {% if notice %}<p class="notice" role="status">{{ notice }}</p>{% endif %}
+    {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+    {% if logged_in %}
+    <div class="access-grid">
+      <section class="workspace-panel" aria-labelledby="history-title">
+        <h2 id="history-title">История заказов</h2>
+        {% set labels = {"draft": "Черновик", "agreed": "Готов к оплате", "payment_pending": "Ожидает оплаты", "paid": "Оплачен", "deposit_received": "Предоплата получена"} %}
+        {% for order in purchases %}
+        <p><a href="/s/{{ order.merchant }}/orders/{{ order.id }}">{{ order.name }} · #{{ order.id[:8] }}</a> · {{ labels[order.state] }}</p>
+        {% else %}
+        <p>{{ "На этой странице нет заказов." if history_page > 1 else "В этой учётной записи пока нет заказов." }}</p>
+        {% endfor %}
+        {% if history_page > 1 or history_more %}
+        <nav class="section-nav" aria-label="Страницы истории заказов">
+          {% if history_page > 1 %}<a href="/account?page={{ history_page - 1 }}">Предыдущая страница</a>{% endif %}
+          {% if history_more %}<a href="/account?page={{ history_page + 1 }}">Следующая страница</a>{% endif %}
+        </nav>
+        {% endif %}
+        {% if local %}
+        <form action="/account/claim" method="post">
+          <input type="hidden" name="token" value="{{ session_csrf }}">
+          <button class="secondary">Перенести гостевые заказы с этого устройства</button>
+        </form>
+        {% endif %}
+      </section>
+      <section class="workspace-panel" aria-labelledby="profile-title">
+        <h2 id="profile-title">Учётная запись</h2>
+        {% if not local %}
+        <p>Вход через корпоративную учётную запись.</p>
+        <a class="button secondary" href="/oauth2/sign_out">Выйти</a>
+        {% else %}
+        {% if username %}<p>Логин <strong>{{ username }}</strong></p>{% endif %}
+        {% if methods %}<p>Подключены {{ methods|join(", ") }}</p>{% endif %}
+        {% for store in stores %}
+        <form action="/account/merchant" method="post">
+          <input type="hidden" name="token" value="{{ session_csrf }}">
+          <input type="hidden" name="slug" value="{{ store.slug }}">
+          <button class="secondary">{{ store.name }}</button>
+        </form>
+        {% endfor %}
+        <p><a href="/merchant/login">Подтвердить доступ к магазину кодом владельца</a></p>
+        <form action="/account/logout" method="post">
+          <input type="hidden" name="token" value="{{ session_csrf }}">
+          <button class="secondary">Выйти на этом устройстве</button>
+          <button class="secondary" name="everywhere" value="true">Выйти на всех устройствах</button>
+        </form>
+        {% endif %}
+      </section>
+    </div>
+    {% endif %}
+    {% if local %}
+    <div class="access-grid account-methods">
+      {% if not logged_in or not username %}
+      <section class="workspace-panel" aria-labelledby="password-title">
+        <h2 id="password-title">Логин и пароль</h2>
+        {% if not logged_in %}
+        <form action="/account/password/login" method="post">
+          <input type="hidden" name="token" value="{{ browser_csrf }}">
+          <label for="login-username">Логин</label>
+          <input id="login-username" name="username" required maxlength="40" autocomplete="username" autocapitalize="none">
+          <label for="login-password">Пароль</label>
+          <input id="login-password" name="password" required type="password" maxlength="128" autocomplete="current-password">
+          <button>Войти</button>
+        </form>
+        {% endif %}
+        <details{% if logged_in %} open{% endif %}>
+          <summary>{{ "Добавить логин и пароль" if logged_in else "Создать учётную запись" }}</summary>
+          <form action="{{ '/account/password/add' if logged_in else '/account/password/register' }}" method="post">
+            <input type="hidden" name="token" value="{{ browser_csrf }}">
+            <label for="new-username">Новый логин</label>
+            <input id="new-username" name="username" required minlength="3" maxlength="40" autocomplete="username"
+                   aria-describedby="login-help" autocapitalize="none">
+            <p id="login-help" class="hint">Латинские буквы, цифры, точка, дефис и подчёркивание.</p>
+            <label for="new-password">Новый пароль</label>
+            <input id="new-password" name="password" required type="password" minlength="12" maxlength="128" autocomplete="new-password"
+                   aria-describedby="password-help">
+            <p id="password-help" class="hint">Не менее 12 символов.</p>
+            <button>{{ "Добавить" if logged_in else "Зарегистрироваться" }}</button>
+          </form>
+        </details>
+      </section>
+      {% endif %}
+      {% if providers or email_ready or max_enabled %}
+      <section class="workspace-panel" aria-labelledby="social-title">
+        <h2 id="social-title">{{ "Добавить способ входа" if logged_in else "Другие способы входа" }}</h2>
+        {% if logged_in %}<p>Подключённым способом можно будет открыть этот же аккаунт на другом устройстве.</p>{% endif %}
+        <div class="account-providers">
+          {% for id, name in providers.items() %}
+          <form action="/account/oauth/{{ id }}" method="post" data-social-login>
+            <input type="hidden" name="token" value="{{ browser_csrf }}">
+            <button class="secondary">{{ name }}</button>
+          </form>
+          {% endfor %}
+          {% if max_enabled %}
+          <form action="/account/max" method="post">
+            <input type="hidden" name="token" value="{{ browser_csrf }}">
+            <button class="secondary">MAX</button>
+          </form>
+          {% endif %}
+        </div>
+        <p id="social-status" class="hint" role="status"></p>
+        {% if email_ready %}
+        <form action="/account/email" method="post">
+          <input type="hidden" name="token" value="{{ browser_csrf }}">
+          <label for="account-email">Электронная почта</label>
+          <input id="account-email" type="email" name="email" required maxlength="254" autocomplete="email">
+          <button class="secondary">Отправить ссылку для входа</button>
+        </form>
+        {% endif %}
+      </section>
+      {% endif %}
+    </div>
+    {% endif %}
+  </main>
+</body>
+</html>

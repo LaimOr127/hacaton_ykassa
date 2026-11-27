@@ -8,6 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, Form, Query, Request, UploadFile
 from fastapi.responses import RedirectResponse, Response
 
+from .accounts import account_required, active_account
 from .checkout import checkout_flags
 from .gateway import YOO_TOOLS, payment_reference
 from .merchants import CLEANING_CSV, export_catalog
@@ -17,7 +18,7 @@ from .payment_documents import PDF_LIMIT, documents_for
 from .session_security import SESSION_TOKEN, check_csrf, csrf, digest
 
 
-def merchant_routes(merchants, templates, payments):
+def merchant_routes(merchants, templates, payments, accounts):
     router = APIRouter(prefix="/merchant")
     store, settings = merchants.store, merchants.settings
     prefix = "__Host-" if settings.secure else ""
@@ -42,6 +43,20 @@ def merchant_routes(merchants, templates, payments):
             if not registered(slug):
                 raise OrderError(401, "merchant_setup_required", "Сначала создайте назначенную витрину.")
             return slug, token
+        current = request.state.account
+        if current:
+            with store.read() as db:
+                active = active_account(db, current["id"])
+                if not active:
+                    raise account_required()
+                linked = db.execute(
+                    """SELECT merchant FROM account_merchants WHERE account_id = ?
+                       ORDER BY (merchant = ?) DESC, merchant LIMIT 1""", (active["account_id"], active["merchant"]),
+                ).fetchone()
+            if not linked:
+                raise OrderError(401, "merchant_setup_required", "Подтвердите доступ кодом магазина.")
+            slug = linked["merchant"]
+            return slug, f"seller:{slug}:{request.state.account_token}"
         token = request.cookies.get(session_cookie, "")
         if not SESSION_TOKEN.fullmatch(token):
             raise OrderError(401, "merchant_session_required", "Войдите в кабинет продавца.")
@@ -63,6 +78,7 @@ def merchant_routes(merchants, templates, payments):
         token = secrets.token_urlsafe(32)
         response = templates.TemplateResponse(request, "merchant_login.html", {
             "csrf": csrf(token), "enable_setup": bool(settings.setup_key), "error": message,
+            "accounts_enabled": settings.accounts_enabled, "has_account": bool(request.state.account),
         }, status_code=status)
         response.set_cookie(entry_cookie, token, max_age=900, httponly=True, secure=settings.secure, samesite="strict")
         return response
@@ -79,13 +95,24 @@ def merchant_routes(merchants, templates, payments):
     def make_session(request, slug):
         token = secrets.token_urlsafe(32)
         old = request.cookies.get(session_cookie, "")
+        current = request.state.account
         with store.transaction() as db:
             now = int(time.time())
             db.execute("DELETE FROM merchant_sessions WHERE id = ? OR expires_at <= ?", (digest(old), now))
-            db.execute("INSERT INTO merchant_sessions VALUES (?, ?, ?)", (digest(token), slug, now + age))
+            if current:
+                active = active_account(db, current["id"])
+                if not active:
+                    raise account_required()
+                db.execute("INSERT OR IGNORE INTO account_merchants VALUES (?, ?)", (active["account_id"], slug))
+                db.execute("UPDATE account_sessions SET merchant = ? WHERE id = ?", (slug, active["id"]))
+            else:
+                db.execute("INSERT INTO merchant_sessions VALUES (?, ?, ?)", (digest(token), slug, now + age))
         response = RedirectResponse("/merchant", status_code=303)
         response.delete_cookie(entry_cookie, httponly=True, secure=settings.secure, samesite="strict")
-        response.set_cookie(session_cookie, token, max_age=age, httponly=True, secure=settings.secure, samesite="strict")
+        if current:
+            response.delete_cookie(session_cookie, httponly=True, secure=settings.secure, samesite="strict")
+        else:
+            response.set_cookie(session_cookie, token, max_age=age, httponly=True, secure=settings.secure, samesite="strict")
         return response
 
     def dashboard(
@@ -138,6 +165,7 @@ def merchant_routes(merchants, templates, payments):
         return templates.TemplateResponse(request, "merchant.html", {
             "slug": slug, "name": owner["name"], "csrf": csrf(token), "error": error, "notice": notice,
             "private": private, "model_connection": merchants.model_summary(slug),
+            "account_link": bool(settings.accounts_enabled or private),
             "model_available": merchants.model_connection(slug) is not None,
             "openrouter_oauth": settings.openrouter_oauth,
             "openrouter_model": settings.openrouter_model,
@@ -503,6 +531,12 @@ def merchant_routes(merchants, templates, payments):
         check_csrf(request, settings.origin, session, token)
         if private:
             return RedirectResponse("/oauth2/sign_out", status_code=303)
+        if request.state.account:
+            with store.transaction() as db:
+                db.execute("DELETE FROM account_sessions WHERE id = ?", (request.state.account["id"],))
+            response = RedirectResponse("/account", status_code=303)
+            response.delete_cookie(accounts.cookie, httponly=True, secure=settings.secure, samesite="lax")
+            return response
         with store.transaction() as db:
             db.execute("DELETE FROM merchant_sessions WHERE id = ?", (digest(session),))
         response = RedirectResponse("/merchant/login", status_code=303)

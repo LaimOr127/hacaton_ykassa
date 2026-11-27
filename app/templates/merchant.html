@@ -11,6 +11,7 @@
 <body class="merchant">
   <header class="masthead">
     <a class="brand" href="/merchant">Заказ из переписки</a>
+    {% if account_link %}<a href="/account">Профиль</a>{% endif %}
     <form class="inline" method="post" action="/merchant/logout">
       <input type="hidden" name="token" value="{{ csrf }}"><button class="secondary">Выйти</button>
     </form>

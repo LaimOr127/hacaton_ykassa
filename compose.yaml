@@ -26,6 +26,10 @@ services:
       MAIL_FROM: ${MAIL_FROM:-}
       MAIL_SMTP_USER: ${MAIL_SMTP_USER:-}
       MAIL_SMTP_PASSWORD: ${MAIL_SMTP_PASSWORD:-}
+      ACCOUNT_AUTH_ENABLED: ${ACCOUNT_AUTH_ENABLED:-0}
+      SOCIAL_AUTH_JSON: ${SOCIAL_AUTH_JSON:-}
+      MAX_BOT_NAME: ${MAX_BOT_NAME:-}
+      MAX_BOT_TOKEN: ${MAX_BOT_TOKEN:-}
     volumes:
       - order_data:/data
     security_opt:

@@ -21,6 +21,8 @@ jobs:
       - run: python -m ruff check app tests scripts
       - run: node --check app/static/order.js
       - run: node --check app/static/merchant.js
+      - run: node --check app/static/account.js
+      - run: node --check app/static/account-max.js
       - run: python -m pytest -q
       - name: Audit pinned runtime dependencies
         run: |
