@@ -31,6 +31,10 @@ class LostReply:
             description=self.reference if external_id != "wrong-reference" else "Unrelated payment",
         )
 
+    def find_payment(self, created_at, attempt_id, amount):
+        assert created_at > 0 and self.reference == f"Order {attempt_id}" and amount == 725_000
+        return "succeeded"
+
 
 def manager(client, slug):
     landing = client.get("/merchant/login")
@@ -80,7 +84,8 @@ def test_operator_recovers_only_verified_payment(tmp_path, final_status):
             rejected = client.post(review, data={"token": owner, "payment_id": payment_id}, headers={"Origin": ORIGIN})
             assert rejected.status_code == 409
         assert client.get(check_url).json()["status"] == "unknown"
-        result = client.post(review, data={"token": owner, "payment_id": final_status}, headers={"Origin": ORIGIN})
+        selected = {"payment_id": "canceled"} if final_status == "canceled" else {}
+        result = client.post(review, data={"token": owner, **selected}, headers={"Origin": ORIGIN})
         assert result.status_code == 200
         assert client.get(check_url).json()["status"] == final_status
         expected_order_state = "paid" if final_status == "succeeded" else "agreed"

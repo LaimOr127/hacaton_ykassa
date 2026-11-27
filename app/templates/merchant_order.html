@@ -15,6 +15,7 @@
     <div class="merchant-heading"><h1>Заказ #{{ order.id[:8] }}</h1>
       {% if order.fulfilled %}<span class="pill paid">Исполнен</span>{% endif %}
     </div>
+    {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
     <div class="merchant-layout">
       <section class="workspace-panel" aria-labelledby="transcript-heading">
         <h2 id="transcript-heading">Переписка</h2>
@@ -52,6 +53,29 @@
           {% endif %}
         {% endif %}
       </aside>
+      {% if not simulated and order.status in ["paid", "deposit_received"] %}
+      <section class="workspace-panel catalog-panel" aria-labelledby="refunds-heading">
+        <h2 id="refunds-heading">Возвраты по заказу</h2>
+        <form action="/merchant/orders/{{ order.id }}/refunds" method="post">
+          <input type="hidden" name="token" value="{{ csrf }}">
+          <button class="secondary">Обновить список из ЮKassa</button>
+        </form>
+        {% if refunds is not none %}
+          {% for refund in refunds %}
+          <article class="review-row">
+            <h3>{{ refund.amount.value }} ₽ · {{ {"succeeded": "Возврат проведён", "pending": "В обработке", "canceled": "Отменён"}[refund.status] }}</h3>
+            <form action="/merchant/orders/{{ order.id }}/refunds" method="post">
+              <input type="hidden" name="token" value="{{ csrf }}">
+              <input type="hidden" name="refund_id" value="{{ refund.id }}">
+              <button class="secondary">Проверить этот возврат</button>
+            </form>
+          </article>
+          {% else %}
+          <p>ЮKassa не нашла возвратов по этому заказу.</p>
+          {% endfor %}
+        {% endif %}
+      </section>
+      {% endif %}
     </div>
   </main>
 </body>

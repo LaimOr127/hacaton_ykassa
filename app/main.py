@@ -2,7 +2,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -41,6 +41,10 @@ class Confirm(BaseModel):
 class Message(Confirm):
     client_message_id: UUID
     text: Annotated[str, StringConstraints(min_length=1, max_length=4000)]
+
+
+class PaymentConfirm(Confirm):
+    kind: Literal["payment", "invoice"] = "payment"
 
 
 def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, agent=None, gateway=None):
@@ -101,12 +105,13 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
                 return JSONResponse({"code": "request_too_large", "message": "Запрос слишком длинный."}, status_code=413)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
+        form_action = " https://openrouter.ai" if settings.openrouter_oauth and request.url.path.startswith("/merchant") else ""
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; script-src 'self'; style-src 'self'; "
-            "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+            f"base-uri 'none'; frame-ancestors 'none'; form-action 'self'{form_action}"
         )
         response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "same-origin"
+        response.headers["Referrer-Policy"] = "no-referrer" if request.url.path.startswith("/merchant/model/openrouter") else "same-origin"
         return response
 
     @app.exception_handler(OrderError)
@@ -194,6 +199,7 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
             "storefront.html",
             {
                 "title": view_catalog.title, "csrf": csrf(token), "mode": settings.mode, "slug": slug,
+                "invoices": settings.mode == "live" and settings.mcp_invoices and bool(merchants.token(slug)),
                 "coffee_example": slug == "coffee" and {"breakfast", "vegetarian"} <= view_catalog.products.keys(),
                 "cleaning_example": {item.basis for item in view_catalog.products.values()} >= {"area", "fixed"}
                 and {"cleaning", "oven"} <= view_catalog.products.keys(),
@@ -222,8 +228,11 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
         )
 
     @app.post(API + "/orders/{order_id}/payment-attempts", status_code=201)
-    def confirm(request: Request, order_id: str, body: Confirm, key: Annotated[UUID, Header(alias="Idempotency-Key")]):
-        attempt, created = payments.create(session(request, write=True), order_id, str(key), body.order_version)
+    def confirm(request: Request, order_id: str, body: PaymentConfirm, key: Annotated[UUID, Header(alias="Idempotency-Key")]):
+        attempt, created = payments.create(
+            session(request, write=True), order_id, str(key), body.order_version, body.kind,
+            allow_invoice=settings.mode == "live" and settings.mcp_invoices,
+        )
         location = f"{API}/orders/{order_id}/payment-attempts/{attempt['id']}"
         return JSONResponse(attempt, status_code=201 if created else 200, headers={"Location": location})
 

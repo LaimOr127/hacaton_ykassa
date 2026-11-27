@@ -53,6 +53,7 @@ jobs:
           private() { docker compose -p private-check -f compose.yaml -f compose.private.yaml "$@"; }
           trap 'private down' EXIT
           private config --format json | python -c 'import json,sys; s=json.load(sys.stdin)["services"]; assert not s["app"].get("ports") and "swagger" not in s; assert json.loads(s["app"]["environment"]["OIDC_MERCHANTS_JSON"])=={"owner":"coffee"}; p=s["auth"]["ports"]; assert len(p)==1 and p[0]["host_ip"]=="127.0.0.1"'
+          private config --format json | python -c 'import json,sys; e=json.load(sys.stdin)["services"]["auth"]["environment"]; assert e["OAUTH2_PROXY_API_ROUTES"]==r"^/merchant/model/openrouter/callback\z"'
           private run --rm --no-deps auth --version
           private up --build -d --wait app
           private exec -T app python - <<'PY'

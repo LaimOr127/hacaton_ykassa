@@ -41,9 +41,11 @@ body { margin: 0; background: var(--canvas); color: var(--ink); line-height: 1.5
 main { width: min(1080px, calc(100% - 40px)); margin: 42px auto; }
 h1 { margin: 0 0 26px; font-size: clamp(1.8rem, 4vw, 3rem); line-height: 1.15; }
 h2 { margin: 0 0 18px; font-size: 1.2rem; }
-.workspace { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(290px, 1fr); gap: 24px; }
-.conversation, .receipt { min-width: 0; padding: 24px; border: 1px solid var(--edge); background: var(--panel); }
-.receipt { align-self: start; border-top: 5px solid var(--accent); }
+.workspace { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(290px, 1fr); align-items: start; gap: 24px; }
+.conversation, .receipt { min-width: 0; padding: 24px; border: 1px solid var(--edge); border-radius: 14px; background: var(--panel); }
+.receipt { align-self: start; }
+.receipt-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.order-reference { font-size: .9rem; color: var(--muted); font-variant-numeric: tabular-nums; }
 .messages { min-height: 160px; max-height: 56vh; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
 .message {
   margin: 0; max-width: 90%; padding: 10px 14px; border-radius: 3px 10px 10px 10px;
@@ -74,6 +76,17 @@ button:disabled { cursor: wait; opacity: .65; }
 #empty, #deposit { color: var(--muted); }
 #notice { color: var(--error); }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.payment-panel { margin-top: 22px; padding: 16px; border-radius: 12px; background: var(--reply); }
+.payment-panel h3 { margin: 0 0 10px; font-size: 1.05rem; }
+.payment-progress { display: flex; flex-wrap: wrap; gap: 8px 12px; padding: 0; margin: 0; list-style: none; }
+.payment-progress li { display: flex; align-items: center; gap: 6px; font-size: .82rem; color: var(--muted); }
+.payment-progress li::before { content: ""; width: .6rem; height: .6rem; flex: none; border-radius: 50%; border: 1px solid currentColor; }
+.payment-progress .is-complete::before, .payment-progress [aria-current]::before { background: currentColor; }
+.payment-progress [aria-current] { color: var(--accent); font-weight: 700; }
+#payment-status { margin: 12px 0 0; }
+.payment-hint { color: var(--muted); font-size: .88rem; margin: 8px 0 0; }
+.payment-choice { display: grid; gap: 6px; margin-top: 14px; }
+.payment-choice select { color: var(--ink); background: var(--panel); padding: 8px; min-height: 44px; border: 1px solid var(--edge); border-radius: 6px; font: inherit; }
 .seller-review {
   background: var(--reply); padding: 10px 14px; border-inline-start: 3px solid var(--accent);
   white-space: pre-wrap; overflow-wrap: anywhere;
@@ -83,4 +96,5 @@ button:disabled { cursor: wait; opacity: .65; }
   .masthead, .conversation, .receipt { padding: 14px; }
   .workspace { grid-template-columns: minmax(0, 1fr); gap: 16px; }
   .messages { min-height: 108px; max-height: 42vh; }
+  .payment-panel .actions > * { width: 100%; text-align: center; }
 }

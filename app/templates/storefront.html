@@ -40,20 +40,44 @@
           <p id="notice" role="alert" hidden></p>
         </section>
         <aside class="receipt" aria-labelledby="receipt-title">
-          <h2 id="receipt-title">Ваш заказ</h2>
+          <div class="receipt-heading">
+            <h2 id="receipt-title">Ваш заказ</h2>
+            <span id="order-reference" class="order-reference" hidden></span>
+          </div>
           <p id="empty">Позиции появятся здесь после сообщения.</p>
           <ul id="items" class="items"></ul>
           <div class="total"><span>Итого</span><strong id="total">0 ₽</strong></div>
           <p id="deposit" hidden></p>
-          <p id="payment-status" role="status"></p>
           <div id="seller-review" class="seller-review" role="status" hidden></div>
-          <div class="actions">
-            <button id="pay" type="button" hidden>Подтвердить заказ</button>
-            <a id="checkout" target="_blank" rel="noopener noreferrer" class="button" hidden>Открыть ЮKassa</a>
-            <button id="check-payment" type="button" class="secondary" hidden>Проверить статус</button>
-            <button id="simulate" type="button" hidden>Подтвердить симуляцию</button>
-            <button id="new-order" type="button" class="secondary" hidden>Начать новый заказ</button>
-          </div>
+          <section class="payment-panel" aria-labelledby="payment-heading">
+            <h3 id="payment-heading">Оплата заказа</h3>
+            <ol class="payment-progress" aria-label="Этапы оплаты">
+              <li id="payment-review" aria-current="step">Подтверждение заказа</li>
+              <li id="payment-provider">{{ "Симуляция" if mode == "simulated" else "ЮKassa" }}</li>
+              <li id="payment-verified">Проверка оплаты</li>
+            </ol>
+            <p id="payment-status" role="status"></p>
+            <p id="invoice-expiry" class="payment-hint" hidden></p>
+            {% if invoices %}
+            <div id="payment-choice" class="payment-choice" hidden>
+              <label for="payment-kind">Как хотите оплатить?</label>
+              <select id="payment-kind">
+                <option value="payment">Прямая оплата</option>
+                <option value="invoice">Счёт со ссылкой для оплаты</option>
+              </select>
+            </div>
+            {% endif %}
+            <div class="actions">
+              <button id="pay" type="button" hidden>Подтвердить заказ</button>
+              <a id="checkout" target="_blank" rel="noopener noreferrer" class="button" aria-describedby="checkout-hint" hidden>Перейти в ЮKassa</a>
+              <button id="copy-invoice" type="button" class="secondary" hidden>Скопировать ссылку на счёт</button>
+              <button id="check-payment" type="button" class="secondary" hidden>Проверить статус</button>
+              <button id="simulate" type="button" hidden>Подтвердить симуляцию</button>
+              <button id="new-order" type="button" class="secondary" hidden>Начать новый заказ</button>
+            </div>
+            <p id="checkout-hint" class="payment-hint" hidden>Оплата откроется в новой вкладке. После неё вернитесь к заказу.</p>
+            <p id="payment-action-status" class="payment-hint" role="status"></p>
+          </section>
         </aside>
       </div>
     </main>

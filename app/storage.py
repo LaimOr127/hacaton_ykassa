@@ -18,6 +18,11 @@ CREATE TABLE IF NOT EXISTS model_connectors (
     merchant TEXT PRIMARY KEY REFERENCES merchants(slug),
     provider TEXT NOT NULL, model TEXT NOT NULL, ciphertext TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS model_authorizations (
+    state_hash TEXT PRIMARY KEY, merchant TEXT NOT NULL REFERENCES merchants(slug),
+    owner_hash TEXT NOT NULL, verifier TEXT NOT NULL, revision TEXT, expires_at INTEGER NOT NULL,
+    UNIQUE (merchant, owner_hash)
+);
 CREATE TABLE IF NOT EXISTS auth_attempts (
     address TEXT NOT NULL, attempted_at INTEGER NOT NULL
 );
@@ -57,6 +62,8 @@ CREATE TABLE IF NOT EXISTS attempts (
     request_key TEXT NOT NULL, order_version INTEGER NOT NULL, snapshot TEXT NOT NULL,
     state TEXT NOT NULL, external_id TEXT UNIQUE, confirmation_url TEXT,
     created_at INTEGER NOT NULL, next_check INTEGER NOT NULL DEFAULT 0,
+    kind TEXT NOT NULL DEFAULT 'payment' CHECK (kind IN ('payment','invoice')),
+    settled_payment_id TEXT, candidate_id TEXT,
     UNIQUE (order_id, request_key)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS active_payment ON attempts(order_id)
@@ -93,6 +100,14 @@ class Store:
             db.execute("INSERT OR IGNORE INTO settings VALUES ('mode', ?)", (self.mode,))
             if db.execute("SELECT value FROM settings WHERE key = 'mode'").fetchone()[0] != self.mode:
                 raise ValueError("Для каждого платёжного режима требуется отдельная база данных")
+            fields = {row["name"] for row in db.execute("PRAGMA table_info(attempts)")}
+            if "kind" not in fields:
+                db.execute("ALTER TABLE attempts ADD COLUMN kind TEXT NOT NULL DEFAULT 'payment' CHECK (kind IN ('payment','invoice'))")
+            if "settled_payment_id" not in fields:
+                db.execute("ALTER TABLE attempts ADD COLUMN settled_payment_id TEXT")
+            if "candidate_id" not in fields:
+                db.execute("ALTER TABLE attempts ADD COLUMN candidate_id TEXT")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS settled_invoice_payment ON attempts(settled_payment_id)")
             self.backfill_reviews(db)
 
     @staticmethod

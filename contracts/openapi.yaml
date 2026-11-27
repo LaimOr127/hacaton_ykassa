@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Заказ из переписки
-  version: 0.3.1
+  version: 0.4.0
   description: |
     HTTP API покупателя. Примеры содержат вымышленные данные.
     Действия ЮKassa выполняются на сервере через MCP.
@@ -209,6 +209,9 @@ paths:
       summary: Подтвердить версию и зарегистрировать платёжную попытку
       description: |
         Вызов означает явное согласие покупателя с показанной версией.
+        По умолчанию создаётся прямой платёж. При kind invoice создаётся счёт,
+        если этот способ включён в развёртывании. Оба способа используют одну
+        активную попытку на заказ. Смена вида при повторе ключа даёт 409.
         Для пустого заказа, нулевого платежа или уже завершённой оплаты
         возвращается 409 order_not_payable.
         Сервер проверяет актуальность цены и заказа. Если цены изменились, сервер
@@ -233,6 +236,10 @@ paths:
               required: [order_version]
               properties:
                 order_version: {$ref: '#/components/schemas/Version'}
+                kind:
+                  type: string
+                  enum: [payment, invoice]
+                  default: payment
             examples:
               coffee:
                 summary: Кофейня, подтверждение 7 350 ₽
@@ -409,7 +416,7 @@ components:
                 properties:
                   code:
                     type: string
-                    enum: [idempotency_conflict, request_in_progress, payment_in_progress, order_not_payable, order_locked, seller_review_required]
+                    enum: [idempotency_conflict, request_in_progress, payment_in_progress, order_not_payable, order_locked, seller_review_required, invoice_unavailable]
                   message: {type: string}
           examples:
             stale_version:
@@ -527,6 +534,14 @@ components:
           $ref: '#/components/schemas/Kopecks'
           minimum: 1
         currency: {type: string, const: RUB}
+        kind:
+          type: string
+          const: invoice
+          description: Возвращается для счёта. При отсутствии поля попытка относится к прямому платежу.
+        expires_at:
+          type: string
+          format: date-time
+          description: Срок действия доступной ссылки на счёт. Истечение срока подтверждается через MCP.
         status:
           type: string
           enum: [creating, pending, unknown, succeeded, canceled, failed]
