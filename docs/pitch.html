@@ -32,6 +32,11 @@
   .flow p { font-size: 24px }
   .checks { list-style: none; display: grid; gap: 12px; margin: 17px 0 0; padding: 0 }
   .checks li { padding: 12px 0; border-bottom: 1px solid #b6cecf }
+  .metrics { margin-top: 0 }
+  .metrics .amount { font-size: 58px }
+  .measure { display: grid; grid-template-columns: 180px 1fr 125px; align-items: center; gap: 16px; font-size: 22px }
+  .bar { display: block; height: 12px; border-radius: 6px; background: #008578 }
+  .bar-short { width: 33.3% }
   a { color: #00594e }
   @media print { body { background: #fff } .slide { margin: 0; print-color-adjust: exact; -webkit-print-color-adjust: exact } }
 </style>
@@ -39,7 +44,7 @@
   <article class="slide cover">
     <p class="context">Хакатон ЮKassa · Трек «Интегратор»</p>
     <h1>Заказ из<br>переписки</h1>
-    <p class="lead">Агент собирает заказ из сообщений, считает его по прайсу продавца и проверяет платёж через MCP ЮKassa.</p>
+    <p class="lead">Агент собирает заказ из сообщений. Сервер считает стоимость по прайсу продавца и подтверждает оплату через MCP ЮKassa.</p>
   </article>
   <article class="slide">
     <h2>Когда покупатель меняет заказ</h2>
@@ -58,7 +63,7 @@
       <section><h3>Клининг</h3><p>Тариф по площади и цена допуслуги. Предоплата 30% от 5&nbsp;300&nbsp;₽ составляет <strong>1&nbsp;590&nbsp;₽</strong>.</p></section>
     </div>
     <p class="lead">Владелец загружает CSV, задаёт предоплату и подключает собственный тестовый MCP-токен.</p>
-    <p class="note">Регистрация, импорт и симуляция оплаты проверены в браузере.</p>
+    <p class="note">Прайс с диапазонами площади виден на витрине. После аванса остаток оплачивается из той же карточки.</p>
   </article>
   <article class="slide">
     <h2>Как заказ становится оплаченным</h2>
@@ -70,13 +75,26 @@
     <p class="note">При потере ответа приложение блокирует повторную оплату до сверки в кабинете продавца.</p>
   </article>
   <article class="slide">
-    <h2>Проверка перед защитой</h2>
+    <h2>Заказ остаётся в работе</h2>
     <ul class="checks">
-      <li><strong>30 тестов.</strong> Проверены расчёты, передача заказа продавцу, повторы и восстановление платежей.</li>
-      <li><strong>Два бизнеса.</strong> Обе витрины прошли симуляцию, кабинет проверен в Edge.</li>
-      <li><strong>Осталось.</strong> Тестовая оплата через ЮKassa с подключённой моделью и замер времени оформления.</li>
+      <li><strong>Покупатель.</strong> Входит на другом устройстве, продолжает оплату и скачивает доступные документы.</li>
+      <li><strong>Продавец.</strong> Отвечает на нестандартный заказ и проверяет платёж прямо из карточки.</li>
+      <li><strong>Сервер.</strong> Сверяет ожидающие платежи в фоне и проверяет возвраты перед исполнением.</li>
     </ul>
-    <p class="note"><a href="https://github.com/LaimOr127/hacaton_ykassa">Репозиторий и инструкция запуска</a></p>
+    <p class="note">Для оплаты по долям и доставки документов у магазина отдельные настройки.</p>
+  </article>
+  <article class="slide">
+    <h2>Что подтвердили на двух витринах</h2>
+    <div class="columns metrics">
+      <section><p class="amount">60 из 60</p><p>контрольных прогонов расчёта и переписки</p></section>
+      <section><p class="amount">200 из 200</p><p>заказов завершены в нагрузочной симуляции</p></section>
+    </div>
+    <div>
+      <h3>p95 полного оформления в симуляции</h3>
+      <div class="measure"><span>8 клиентов</span><span class="bar bar-short" aria-hidden="true"></span><strong>2,35 с</strong></div>
+      <div class="measure"><span>24 клиента</span><span class="bar" aria-hidden="true"></span><strong>7,05 с</strong></div>
+    </div>
+    <p class="note">Открытые проверки — тестовый платёж с внешней моделью и замер работы сотрудника. <a href="https://github.com/LaimOr127/hacaton_ykassa">Код и методика</a></p>
   </article>
 </main>
 </html>

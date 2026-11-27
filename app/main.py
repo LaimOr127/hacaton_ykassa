@@ -1,19 +1,20 @@
 import re
 import secrets
 import time
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
+import anyio
 from fastapi import FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .agent import DemoAgent, ModelAgent
@@ -22,11 +23,12 @@ from .account_views import account_routes
 from .catalog import COFFEE, Catalog
 from .checkout import checkout_flags
 from .corporate_identity import CorporateIdentity
-from .gateway import Simulator, YooKassa
+from .gateway import McpPool, Simulator, YooKassa
 from .merchant_views import merchant_routes
 from .merchants import Merchants
 from .orders import OrderError, Orders
-from .payment_documents import PDF_LIMIT, PaymentDocuments
+from .payment_documents import PaymentDocuments
+from .request_body import LimitPostBody
 from .payments import Payments
 from .session_security import SESSION_TOKEN, check_csrf, csrf, digest
 from .settings import Settings
@@ -36,6 +38,14 @@ HERE = Path(__file__).resolve().parent
 STALE_AFTER = 7 * 24 * 60 * 60
 API = "/api/v1"
 TEMPLATES = Jinja2Templates(directory=HERE / "templates")
+
+
+def rubles(amount):
+    whole = format(amount // 100, ",").replace(",", "\u202f")
+    return f"{whole},{amount % 100:02d} ₽"
+
+
+TEMPLATES.env.filters["rubles"] = rubles
 
 
 class Confirm(BaseModel):
@@ -51,8 +61,17 @@ class Message(Confirm):
 class PaymentConfirm(Confirm):
     kind: Literal["payment", "invoice"] = "payment"
     parts: int = Field(default=1, strict=True, ge=1, le=4)
-    tip_percent: int = Field(default=0, strict=True, ge=0, le=15)
+    tip_percent: Literal[0, 5, 10, 15] = 0
+
     part_number: int = Field(default=1, strict=True, ge=1, le=4)
+    balance_payment: bool = Field(default=False, strict=True)
+
+    @field_validator("tip_percent", mode="before")
+    @classmethod
+    def require_integer_tip(cls, value):
+        if type(value) is not int:
+            raise ValueError("Процент чаевых должен быть целым числом.")
+        return value
 
 
 class DocumentEmail(BaseModel):
@@ -68,6 +87,8 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
     agent = agent if agent is not None else (
         DemoAgent() if settings.mode == "simulated" else ModelAgent(settings, merchants.model_connection)
     )
+    pool = McpPool() if settings.mode == "live" else None
+    merchants.mcp_pool = pool
     if gateway is None and settings.mode == "simulated":
         gateway = Simulator(store)
 
@@ -75,7 +96,11 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
         if gateway is not None:
             return gateway
         token = merchants.token(slug, db)
-        return YooKassa(token) if token else None
+        if not token:
+            return None
+        connector = YooKassa(token)
+        connector.pool = pool
+        return connector
 
     orders = Orders(store, merchants.catalog, agent, settings)
     payments = Payments(store, merchants.catalog, gateway_for)
@@ -85,7 +110,21 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
     @asynccontextmanager
     async def lifespan(_app):
         store.initialize()
-        yield
+        if isinstance(agent, ModelAgent) and agent.client.is_closed:
+            agent.client = agent.open_client()
+        async with AsyncExitStack() as stack:
+            if pool:
+                await stack.enter_async_context(pool.open())
+            tasks = await stack.enter_async_context(anyio.create_task_group())
+            if settings.mode == "live":
+                tasks.start_soon(payments.watch_pending)
+            tasks.start_soon(store.expire_sessions)
+            try:
+                yield
+            finally:
+                tasks.cancel_scope.cancel()
+                if isinstance(agent, ModelAgent):
+                    agent.client.close()
 
     app = FastAPI(
         title="Заказ из переписки", lifespan=lifespan,
@@ -95,6 +134,7 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
         TrustedHostMiddleware, allowed_hosts=[urlsplit(settings.origin).hostname, "127.0.0.1", "localhost"],
         www_redirect=False,
     )
+    app.add_middleware(LimitPostBody)
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
     app.include_router(merchant_routes(merchants, TEMPLATES, payments, accounts), include_in_schema=False)
 
@@ -117,18 +157,6 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
             token = request.cookies.get(accounts.cookie, "")
             request.state.account = await run_in_threadpool(accounts.session, token)
             request.state.account_token = token if request.state.account else ""
-        if request.method == "POST":
-            length = request.headers.get("content-length", "")
-            if not length.isascii() or not length.isdecimal():
-                return JSONResponse({"code": "length_required", "message": "Укажите размер запроса."}, status_code=411)
-            if request.url.path == "/merchant/catalog":
-                limit = 80_000
-            elif re.fullmatch(r"/merchant/orders/[a-f0-9]{32}/receipts/[a-f0-9]{32}", request.url.path):
-                limit = PDF_LIMIT + 8192
-            else:
-                limit = 20_000
-            if len(length) > len(str(limit)) or int(length) > limit:
-                return JSONResponse({"code": "request_too_large", "message": "Запрос слишком длинный."}, status_code=413)
         response = await call_next(request)
         response.headers["Cache-Control"] = "no-store"
         form_action = " https://openrouter.ai" if settings.openrouter_oauth and request.url.path.startswith("/merchant") else ""
@@ -226,7 +254,15 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
 
     @app.get("/s/{slug}/orders/{order_id}")
     def open_order(request: Request, slug: str, order_id: str):
-        return render_storefront(request, slug, order_id)
+        try:
+            return render_storefront(request, slug, order_id)
+        except OrderError as error:
+            if error.status not in {401, 404}:
+                raise
+            return TEMPLATES.TemplateResponse(request, "order_access.html", {
+                "slug": slug, "show_account": settings.accounts_enabled or identity is not None,
+                "signed_in": bool(viewer(request)[0]),
+            }, status_code=error.status)
 
     def render_storefront(request, slug, order_id=None):
         with store.read() as db:
@@ -289,7 +325,7 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
                 "coffee_example": slug == "coffee" and {"breakfast", "vegetarian"} <= view_catalog.products.keys(),
                 "cleaning_example": {item.basis for item in view_catalog.products.values()} >= {"area", "fixed"}
                 and {"cleaning", "oven"} <= view_catalog.products.keys(),
-                "order": current, "transcript": transcript,
+                "order": current, "transcript": transcript, "products": view_catalog.products.values(),
             },
         )
         if new_session:
@@ -319,6 +355,7 @@ def create_app(settings: Settings | None = None, *, catalog: Catalog = COFFEE, a
             session(request, write=True), order_id, str(key), body.order_version, body.kind,
             allow_invoice=settings.mode == "live" and settings.mcp_invoices,
             parts=body.parts, tip_percent=body.tip_percent, part_number=body.part_number,
+            balance_payment=body.balance_payment,
         )
         location = f"{API}/orders/{order_id}/payment-attempts/{attempt['id']}"
         return JSONResponse(attempt, status_code=201 if created else 200, headers={"Location": location})

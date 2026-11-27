@@ -1,7 +1,12 @@
 import sqlite3
+import time
 from contextlib import closing, contextmanager
 from pathlib import Path
 from threading import Lock
+
+import anyio
+
+from .diagnostics import record_failure
 
 
 SCHEMA = """
@@ -30,6 +35,7 @@ CREATE INDEX IF NOT EXISTS auth_attempts_time ON auth_attempts(attempted_at);
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY, merchant TEXT NOT NULL, expires_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
 CREATE TABLE IF NOT EXISTS accounts (
     id TEXT PRIMARY KEY, username TEXT UNIQUE, password_hash TEXT
 );
@@ -69,6 +75,7 @@ CREATE TABLE IF NOT EXISTS orders (
     UNIQUE (session_id, create_key)
 );
 CREATE INDEX IF NOT EXISTS merchant_orders ON orders(merchant, state);
+CREATE INDEX IF NOT EXISTS orders_current_attempt ON orders(attempt_id) WHERE attempt_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS checkout_settings (
     merchant TEXT PRIMARY KEY REFERENCES merchants(slug),
     split_payments INTEGER NOT NULL, tips INTEGER NOT NULL,
@@ -106,6 +113,7 @@ CREATE TABLE IF NOT EXISTS fulfilled_orders (
 CREATE TABLE IF NOT EXISTS model_calls (
     call_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, started_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS model_calls_time ON model_calls(started_at);
 CREATE TABLE IF NOT EXISTS attempts (
     id TEXT PRIMARY KEY, order_id TEXT NOT NULL REFERENCES orders(id),
     request_key TEXT NOT NULL, order_version INTEGER NOT NULL, snapshot TEXT NOT NULL,
@@ -117,6 +125,13 @@ CREATE TABLE IF NOT EXISTS attempts (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS active_payment ON attempts(order_id)
     WHERE state IN ('creating', 'pending', 'unknown');
+CREATE INDEX IF NOT EXISTS due_attempts ON attempts(next_check, created_at)
+    WHERE state IN ('pending','unknown');
+CREATE TABLE IF NOT EXISTS payment_refunds (
+    id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL REFERENCES attempts(id),
+    amount_kopecks INTEGER NOT NULL CHECK (amount_kopecks > 0)
+);
+CREATE INDEX IF NOT EXISTS payment_refunds_attempt ON payment_refunds(attempt_id);
 CREATE TABLE IF NOT EXISTS payment_receipts (
     attempt_id TEXT PRIMARY KEY REFERENCES attempts(id), pdf BLOB NOT NULL
 );
@@ -171,6 +186,10 @@ class Store:
                 db.execute("ALTER TABLE attempts ADD COLUMN part_number INTEGER")
             if "verified_at" not in fields:
                 db.execute("ALTER TABLE attempts ADD COLUMN verified_at INTEGER")
+            if "invoice_expires_at" not in fields:
+                db.execute("ALTER TABLE attempts ADD COLUMN invoice_expires_at INTEGER")
+            if "balance_payment" not in fields:
+                db.execute("ALTER TABLE attempts ADD COLUMN balance_payment INTEGER NOT NULL DEFAULT 0")
             db.execute("CREATE UNIQUE INDEX IF NOT EXISTS settled_invoice_payment ON attempts(settled_payment_id)")
             db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS paid_order_part ON attempts(order_id, part_number)
                           WHERE state = 'succeeded' AND part_number IS NOT NULL""")
@@ -194,6 +213,28 @@ class Store:
                WHERE id IN (SELECT order_id FROM seller_reviews WHERE closed_at IS NULL)""",
         )
         db.execute("INSERT INTO settings VALUES (?, '1')", (marker,))
+
+    async def expire_sessions(self):
+        while True:
+            await anyio.sleep(60)
+            try:
+                await anyio.to_thread.run_sync(self.prune_sessions)
+            except StoreBusy as error:
+                record_failure("", "storage", "expire_sessions", "storage_busy", error)
+
+    def prune_sessions(self):
+        now = int(time.time())
+        with self.transaction() as db:
+            db.execute("DELETE FROM model_calls WHERE started_at < ?", (now - 3600,))
+            db.execute(
+                """DELETE FROM sessions WHERE id IN (
+                       SELECT s.id FROM sessions s WHERE s.expires_at <= ?
+                       AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.session_id = s.id)
+                       AND NOT EXISTS (SELECT 1 FROM shopper_owners own WHERE own.session_id = s.id)
+                       AND NOT EXISTS (SELECT 1 FROM model_calls c WHERE c.session_id = s.id)
+                       LIMIT 1000
+                   )""", (now,),
+            )
 
     @contextmanager
     def read(self):

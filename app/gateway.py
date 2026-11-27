@@ -1,13 +1,16 @@
 import json
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from decimal import Decimal
+from threading import BoundedSemaphore
 from typing import Literal
 from urllib.parse import urlsplit
 
 import anyio
 import httpx
+from anyio.from_thread import BlockingPortal
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from pydantic import BaseModel, Field, StrictStr, ValidationError
@@ -52,6 +55,10 @@ class Refund(BaseModel):
     payment_id: StrictStr = Field(min_length=1, max_length=128)
     status: Literal["pending", "succeeded", "canceled"]
     amount: ProviderAmount
+
+    @property
+    def kopecks(self):
+        return int(Decimal(self.amount.value) * 100)
 
 
 class MCPPage[Item: BaseModel](BaseModel):
@@ -125,27 +132,80 @@ def trusted_checkout(url: str | None) -> str | None:
     return url
 
 
+class McpBusy(Exception):
+    pass
+
+
+class McpPool:
+    def __init__(self):
+        self.token = ContextVar("mcp_token")
+        self.slots = BoundedSemaphore(6)
+
+    async def authorize(self, request):
+        request.headers.pop("Cookie", None)
+        if request.url.scheme == "https" and request.url.host == "mcp.yookassa.ru" and request.url.port in (None, 443):
+            request.headers["Authorization"] = "Bearer " + self.token.get()
+
+    @asynccontextmanager
+    async def open(self):
+        async with AsyncExitStack() as stack:
+            self.client = await stack.enter_async_context(httpx.AsyncClient(
+                timeout=10, follow_redirects=False, trust_env=False, event_hooks={"request": [self.authorize]},
+            ))
+            self.portal = await stack.enter_async_context(BlockingPortal())
+            yield
+
+    def run(self, token, operation, *args):
+        if not self.slots.acquire(blocking=False):
+            raise McpBusy()
+        try:
+            async def authorized():
+                context = self.token.set(token)
+                try:
+                    return await operation(*args)
+                finally:
+                    self.token.reset(context)
+
+            return self.portal.call(authorized)
+        finally:
+            self.slots.release()
+
+
 class YooKassa:
+    pool = None
     def __init__(self, token: str):
         self.token = token
 
     @asynccontextmanager
     async def session(self):
         with anyio.fail_after(18):
-            async with httpx.AsyncClient(
-                headers={"Authorization": f"Bearer {self.token}"}, timeout=10, follow_redirects=False,
-            ) as client:
-                async with streamable_http_client("https://mcp.yookassa.ru", http_client=client) as (read, write, _):
-                    async with ClientSession(read, write) as session:
-                        await session.initialize()
-                        yield session
+            async with AsyncExitStack() as stack:
+                client = self.pool.client if self.pool else await stack.enter_async_context(httpx.AsyncClient(
+                    headers={"Authorization": f"Bearer {self.token}"}, timeout=10, follow_redirects=False,
+                ))
+                read, write, _ = await stack.enter_async_context(
+                    streamable_http_client("https://mcp.yookassa.ru", http_client=client),
+                )
+                session = await stack.enter_async_context(ClientSession(read, write))
+                await session.initialize()
+                yield session
+
+    def run(self, operation, *args):
+        if self.pool:
+            try:
+                return self.pool.run(self.token, operation, *args)
+            except McpBusy as error:
+                if operation == self.call and args[0] in {"create_payment", "create_invoice"}:
+                    raise PaymentNotSent() from error
+                raise
+        return anyio.run(operation, *args)
 
     def tools(self) -> set[str]:
         async def available():
             async with self.session() as session:
                 listed = await session.list_tools()
                 return {tool.name for tool in listed.tools}
-        return anyio.run(available)
+        return self.run(available)
 
     def check(self) -> bool:
         return {"create_payment", "get_payment"} <= self.tools()
@@ -186,14 +246,14 @@ class YooKassa:
         return self.parse(response, schema)
 
     def create(self, amount: int, attempt_id: str) -> Payment:
-        return anyio.run(
+        return self.run(
             self.call,
             "create_payment",
             {"amount": provider_amount(amount), "description": payment_reference(attempt_id)},
         )
 
     def get(self, external_id: str) -> Payment:
-        return anyio.run(self.call, "get_payment", {"id": external_id})
+        return self.run(self.call, "get_payment", {"id": external_id})
 
     def create_invoice(self, snapshot: dict, attempt_id: str, order_id: str, created_at: int) -> Invoice:
         amount = provider_amount(snapshot["payable_kopecks"])
@@ -204,13 +264,13 @@ class YooKassa:
                 {"description": item["title"][:128], "price": provider_amount(item["unit_kopecks"]), "quantity": item["quantity"]}
                 for item in snapshot["items"]
             ]
-        return anyio.run(self.call, "create_invoice", {
+        return self.run(self.call, "create_invoice", {
             "amount": amount, "description": payment_reference(attempt_id),
             "expires_at": utc_iso(created_at + INVOICE_LIFETIME), "cart": cart,
         }, Invoice)
 
     def get_invoice(self, external_id: str) -> Invoice:
-        return anyio.run(self.call, "get_invoice", {"id": external_id}, Invoice)
+        return self.run(self.call, "get_invoice", {"id": external_id}, Invoice)
 
     async def pages(self, name, filters, item_type):
         schema = MCPPage[item_type]
@@ -233,7 +293,7 @@ class YooKassa:
         raise ValueError("ЮKassa вернула неполный список.")
 
     def find_payment(self, created_at: int, attempt_id: str, amount: int) -> str | None:
-        items = anyio.run(self.pages, "get_payments_list", {
+        items = self.run(self.pages, "get_payments_list", {
             "created_at_gte": utc_iso(created_at - 120), "created_at_lte": utc_iso(created_at + 600),
         }, ListedPayment)
         candidates = {
@@ -243,10 +303,10 @@ class YooKassa:
         return next(iter(candidates)) if len(candidates) == 1 else None
 
     def list_refunds(self, payment_id: str) -> list[Refund]:
-        return anyio.run(self.pages, "get_refunds_list", {"payment_id": payment_id}, Refund)
+        return self.run(self.pages, "get_refunds_list", {"payment_id": payment_id}, Refund)
 
     def get_refund(self, refund_id: str) -> Refund:
-        return anyio.run(self.call, "get_refund", {"id": refund_id}, Refund)
+        return self.run(self.call, "get_refund", {"id": refund_id}, Refund)
 
 
 class Simulator:

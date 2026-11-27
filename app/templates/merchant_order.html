@@ -49,10 +49,29 @@
         {% if order.checkout and order.checkout.tip_kopecks %}
           <p>Чаевые {{ '%.2f'|format(order.checkout.tip_kopecks / 100) }} ₽</p>
         {% endif %}
+        {% if order.refunded_kopecks %}<p class="error">Возвращено покупателю {{ order.refunded_kopecks | rubles }}.</p>{% endif %}
+        {% if payment_attempt and order.status == "payment_pending" %}
+          <section id="payment-attempt" aria-labelledby="attempt-heading">
+            <h3 id="attempt-heading">Проверка оплаты</h3>
+            <p>{{ {"pending": "Ожидает подтверждения ЮKassa", "creating": "Создаётся",
+                   "unknown": "Нужна сверка", "canceled": "Отменён", "failed": "Создание отклонено",
+                   "succeeded": "Оплачен"}[payment_attempt.state] }}</p>
+            {% if review_payment %}
+            <form action="/merchant/orders/{{ order.id }}/payment-review" method="post">
+              <input type="hidden" name="token" value="{{ csrf }}">
+              {% if payment_attempt.state != "pending" and not payment_attempt.external_id %}
+                <label for="payment-id">ID {{ "счёта" if payment_attempt.kind == "invoice" else "платежа" }} в ЮKassa</label>
+                <input id="payment-id" name="payment_id" maxlength="128" {% if payment_attempt.kind == "invoice" %}required{% endif %}>
+              {% endif %}
+              <button class="secondary">Проверить оплату</button>
+            </form>
+            {% endif %}
+          </section>
+        {% endif %}
         {% if order.status in ["paid", "deposit_received"] %}
           <p class="pill paid">{{ "Предоплата получена" if order.status == "deposit_received" else "Оплачен" }}</p>
-          {% if order.balance_kopecks %}<p>Остаток {{ '%.2f'|format(order.balance_kopecks / 100) }} ₽</p>{% endif %}
-          {% if not order.fulfilled %}
+          {% if order.status == 'deposit_received' and order.balance_kopecks %}<p>Остаток {{ '%.2f'|format(order.balance_kopecks / 100) }} ₽</p>{% endif %}
+          {% if not order.fulfilled and can_fulfill %}
           <form action="/merchant/orders/{{ order.id }}/fulfill" method="post">
             <input type="hidden" name="token" value="{{ csrf }}"><button>Отметить исполненным</button>
           </form>
@@ -76,7 +95,7 @@
         {% endfor %}
       </section>
       {% endif %}
-      {% if not simulated and (order.status in ["paid", "deposit_received"] or (order.checkout and order.checkout.paid_parts)) %}
+      {% if not simulated and has_paid %}
       <section class="workspace-panel catalog-panel" aria-labelledby="refunds-heading">
         <h2 id="refunds-heading">Возвраты по заказу</h2>
         <form action="/merchant/orders/{{ order.id }}/refunds" method="post">

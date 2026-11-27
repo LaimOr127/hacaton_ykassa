@@ -5,7 +5,8 @@ from uuid import uuid4
 import httpx
 from pydantic import ValidationError
 
-from .agent import ModelAgent, ModelNotSent
+from .agent import ModelAgent, ModelFailure, ModelNotSent
+from .diagnostics import clear_failure, record_failure
 from .catalog import Catalog
 from .checkout import checkout_plan, public_plan
 from .storage import Store
@@ -56,6 +57,12 @@ def public_order(db, row):
         "payment_attempt_id": row["attempt_id"],
         **json.loads(row["quote"]),
     }
+    refunds = db.execute(
+        """SELECT COALESCE(SUM(r.amount_kopecks), 0) FROM payment_refunds r
+           JOIN attempts a ON a.id = r.attempt_id WHERE a.order_id = ?""", (row["id"],),
+    ).fetchone()[0]
+    if refunds:
+        data["refunded_kopecks"] = refunds
     review = db.execute("SELECT reply FROM seller_reviews WHERE order_id = ? AND closed_at IS NULL", (row["id"],)).fetchone()
     plan = checkout_plan(db, row["id"])
     if plan:
@@ -199,7 +206,7 @@ class Orders:
             catalog = self.catalog_for(db, session["merchant"])
             recent = db.execute(
                 "SELECT text, result FROM messages WHERE order_id = ? AND result IS NOT NULL "
-                "ORDER BY rowid DESC LIMIT 2",
+                "ORDER BY rowid DESC LIMIT 6",
                 (order_id,),
             ).fetchall()
             message_id = previous["id"] if previous else uuid4().hex
@@ -226,6 +233,7 @@ class Orders:
                 context.append(("", f"Ответ продавца: {seller['reply'][:400]}"))
             if isinstance(self.agent, ModelAgent):
                 proposal = self.agent.propose(catalog, quantities, context, message, before_send=reserve_quota)
+                clear_failure(session["merchant"], "llm")
             else:
                 proposal = self.agent.propose(catalog, quantities, context, message)
             outcome, reply = proposal.outcome, proposal.reply
@@ -256,8 +264,8 @@ class Orders:
                             if reviewed and not changed:
                                 reopen_draft(db, order_id)
                             row = lookup_order(db, session, order_id)
-                if outcome == "clarification" and len(recent) == 2 and all(
-                    json.loads(item["result"])["outcome"] == "clarification" for item in recent
+                if outcome == "clarification" and len(recent) >= 2 and all(
+                    json.loads(item["result"])["outcome"] == "clarification" for item in recent[:2]
                 ):
                     outcome = "handoff"
                 if outcome == "handoff":
@@ -279,8 +287,14 @@ class Orders:
                 return result
         except ModelNotSent as error:
             not_sent = True
+            record_failure(session["merchant"], "llm", "message", "model_not_sent", error.__cause__)
+            raise OrderError(503, "agent_unavailable", str(error)) from error
+        except ModelFailure as error:
+            not_sent = error.rejected
+            record_failure(session["merchant"], "llm", "message", error.code)
             raise OrderError(503, "agent_unavailable", str(error)) from error
         except (httpx.HTTPError, ValidationError, KeyError, IndexError, ValueError, TypeError) as error:
+            record_failure(session["merchant"], "llm", "message", "model_request_error", error)
             raise OrderError(503, "agent_unavailable", "Ответ пока недоступен. Повторите сообщение.") from error
         finally:
             with self.store.transaction() as db:

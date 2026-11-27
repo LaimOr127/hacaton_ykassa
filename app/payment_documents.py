@@ -1,12 +1,13 @@
 import json
 import re
 import smtplib
-import ssl
 import time
 from email.message import EmailMessage
 from hashlib import sha256
 
 from .checkout import checkout_flags
+from .diagnostics import clear_failure, record_failure
+from .mail import smtp_connection
 from .gateway import amount_value, utc_iso
 from .orders import OrderError, lookup_order
 
@@ -136,6 +137,10 @@ class PaymentDocuments:
                 (key, order_id, attempt_id, recipient_hash, kind, document_hash, now),
             )
         result = self.deliver(recipient, document, kind)
+        if result == "accepted":
+            clear_failure(session["merchant"], "smtp")
+        else:
+            record_failure(session["merchant"], "smtp", "send_document", f"mail_{result}")
         with self.store.transaction() as db:
             db.execute("UPDATE receipt_deliveries SET state = ? WHERE order_id = ? AND request_key = ?", (result, order_id, key))
         return {"status": result}
@@ -151,11 +156,7 @@ class PaymentDocuments:
         message.add_attachment(data, maintype=major, subtype=minor, filename=filename)
         started = False
         try:
-            with smtplib.SMTP_SSL(
-                self.settings.mail_host, self.settings.mail_port, timeout=8, context=ssl.create_default_context(),
-            ) as smtp:
-                if self.settings.mail_user:
-                    smtp.login(self.settings.mail_user, self.settings.mail_password)
+            with smtp_connection(self.settings) as smtp:
                 started = True
                 smtp.send_message(message)
         except (smtplib.SMTPRecipientsRefused, smtplib.SMTPSenderRefused, smtplib.SMTPDataError):

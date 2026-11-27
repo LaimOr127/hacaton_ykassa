@@ -33,8 +33,30 @@
     {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
     {% if notice %}<p class="notice" role="status">{{ notice }}</p>{% endif %}
     <div class="merchant-layout">
+      {% if diagnostics %}
+      <section class="workspace-panel catalog-panel" aria-labelledby="diagnostics-title">
+        <h2 id="diagnostics-title">Состояние подключений</h2>
+        <ul class="catalog-list">
+          {% for event in diagnostics %}
+          <li>{{ {"llm": "Модель", "mcp": "ЮKassa", "smtp": "Почта"}[event.service] }} · {{ event.message }}</li>
+          {% endfor %}
+        </ul>
+      </section>
+      {% endif %}
       <section class="workspace-panel orders-panel" id="orders" aria-labelledby="orders-heading">
-        <div class="panel-heading"><h2 id="orders-heading">Последние заказы</h2><span class="hint">С оплатой: {{ paid_count }}</span></div>
+        <div class="panel-heading"><h2 id="orders-heading">Заказы</h2><span class="hint">Всего с оплатой: {{ paid_count }}</span></div>
+        <form method="get" action="/merchant#orders">
+          <label for="order-search">Первые символы номера заказа</label>
+          <input id="order-search" name="order_search" pattern="[a-fA-F0-9]{0,32}" maxlength="32" value="{{ order_search }}">
+          <label for="order-state">Статус заказа</label>
+          <select id="order-state" name="order_state">
+            <option value="">Все статусы</option>
+            {% for value, label in order_states.items() %}
+            <option value="{{ value }}"{% if value == order_state %} selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+          <button class="secondary">Найти</button>
+        </form>
         {% if orders %}
           <table>
             <thead><tr><th scope="col">Заказ</th><th scope="col">Сумма</th><th scope="col">Статус</th></tr></thead>
@@ -50,7 +72,13 @@
             </tbody>
           </table>
         {% else %}
-          <p>Заказов пока нет. {% if catalog_ready %}Проверьте витрину как покупатель.{% else %}Загрузите прайс, чтобы открыть витрину.{% endif %}</p>
+          <p>На этой странице нет заказов.</p>
+        {% endif %}
+        {% if orders_page > 1 or orders_more %}
+        <nav class="section-nav" aria-label="Страницы заказов">
+          {% if orders_page > 1 %}<a href="/merchant?orders_page={{ orders_page - 1 }}&amp;order_state={{ order_state }}&amp;order_search={{ order_search }}#orders">Предыдущие</a>{% endif %}
+          {% if orders_more %}<a href="/merchant?orders_page={{ orders_page + 1 }}&amp;order_state={{ order_state }}&amp;order_search={{ order_search }}#orders">Следующие</a>{% endif %}
+        </nav>
         {% endif %}
       </section>
       <section class="workspace-panel" id="model" aria-labelledby="model-heading">
@@ -170,11 +198,14 @@
           {% if vault_ready %}
           <details>
             <summary>Заменить токен</summary>
-            <p>Сначала завершите активные платежи и сверки. Новый токен должен видеть завершённый платёж этого магазина.</p>
+            <p>Завершите активные платежи перед плановой заменой. Если прежний токен отозван, подтвердите связь нового токена с платёжным журналом магазина.</p>
             <form method="post" action="/merchant/connection">
               <input type="hidden" name="token" value="{{ csrf }}">
               <label for="rotate-mcp">Новый MCP-токен</label>
               <input id="rotate-mcp" type="password" name="mcp_token" required maxlength="4096" autocomplete="off">
+              <label><input type="checkbox" name="recover" value="true"> Восстановить подключение при активных платежах</label>
+              <label for="rotate-anchor">ID платежа или счёта, если в журнале неизвестен внешний ID</label>
+              <input id="rotate-anchor" name="external_id" maxlength="128">
               <button>Проверить и заменить</button>
             </form>
           </details>
@@ -187,10 +218,30 @@
             <input type="hidden" name="token" value="{{ csrf }}">
             <label for="mcp-token">MCP-токен</label>
             <input id="mcp-token" type="password" name="mcp_token" required maxlength="4096" autocomplete="off">
+            <label><input type="checkbox" name="recover" value="true"> Восстановить прежнее подключение</label>
+            <label for="connect-anchor">ID платежа или счёта, если в журнале неизвестен внешний ID</label>
+            <input id="connect-anchor" name="external_id" maxlength="128">
             <button>Проверить и сохранить токен</button>
           </form>
         {% endif %}
       </section>
+      {% if not private %}
+      <section class="workspace-panel" id="access" aria-labelledby="access-heading">
+        <h2 id="access-heading">Доступ продавца</h2>
+        <details>
+          <summary>Сменить код и отозвать остальные доступы</summary>
+          <p>Текущий вход сохранится. Другие продавцы смогут вернуться после получения нового кода.</p>
+          <form method="post" action="/merchant/access/revoke">
+            <input type="hidden" name="token" value="{{ csrf }}">
+            <label for="current-code">Действующий код</label>
+            <input id="current-code" type="password" name="current_code" required maxlength="128" autocomplete="current-password">
+            <label for="new-code">Новый код владельца</label>
+            <input id="new-code" type="password" name="new_code" required minlength="16" maxlength="128" autocomplete="new-password">
+            <button>Сменить код и отозвать доступ</button>
+          </form>
+        </details>
+      </section>
+      {% endif %}
       <section class="workspace-panel catalog-panel" id="checkout-settings" aria-labelledby="checkout-heading">
         <h2 id="checkout-heading">Настройки оплаты</h2>
         <form method="post" action="/merchant/checkout-settings">

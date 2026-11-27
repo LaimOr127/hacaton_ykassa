@@ -16,6 +16,22 @@
     </header>
     <main>
       <h1>Заказ из переписки</h1>
+      <details class="store-menu">
+        <summary>Прайс магазина</summary>
+        <ul class="store-menu-list">
+          {% for product in products %}
+          <li><strong>{{ product.title }}</strong>
+            {% if product.basis == 'area' %}
+              <ul>{% for first, last, price in product.tiers %}
+                <li>{{ first }}–{{ last }} м² <span>{{ price | rubles }}</span></li>
+              {% endfor %}</ul>
+            {% else %}
+              <span>{{ product.unit_kopecks | rubles }}{% if product.basis == 'unit' %} за шт.{% endif %}</span>
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </details>
       <div class="workspace">
         <section class="conversation" aria-labelledby="chat-title">
           <h2 id="chat-title">Переписка</h2>
@@ -27,10 +43,10 @@
               {% if seller_reply %}<p class="message agent"><strong>Продавец</strong><br>{{ seller_reply }}</p>{% endif %}
             {% endfor %}
           </div>
-          {% if not transcript and coffee_example %}
-            <button type="button" id="sample" class="sample" data-message="20 завтраков, из них 5 вегетарианских">Попробовать заказать 20 завтраков</button>
-          {% elif not transcript and cleaning_example %}
-            <button type="button" id="sample" class="sample" data-message="Нужна уборка квартиры 58 м² и чистка духовки.">Попробовать заказать уборку 58 м²</button>
+          {% if coffee_example %}
+            <button type="button" id="sample" class="sample" {% if transcript %}hidden{% endif %} data-message="20 завтраков, из них 5 вегетарианских">Попробовать заказать 20 завтраков</button>
+          {% elif cleaning_example %}
+            <button type="button" id="sample" class="sample" {% if transcript %}hidden{% endif %} data-message="Нужна уборка квартиры 58 м² и чистка духовки.">Попробовать заказать уборку 58 м²</button>
           {% endif %}
           <form id="chat">
             <label for="text">Ваше сообщение</label>
@@ -45,6 +61,7 @@
             <h2 id="receipt-title">Ваш заказ</h2>
             <span id="order-reference" class="order-reference" hidden></span>
           </div>
+          <p id="refunded" role="status" hidden></p>
           <p id="empty">Позиции появятся здесь после сообщения.</p>
           <ul id="items" class="items"></ul>
           <div class="total"><span>Итого</span><strong id="total">0 ₽</strong></div>
