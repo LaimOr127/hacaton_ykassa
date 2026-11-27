@@ -7,9 +7,10 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from app.agent import DemoAgent
+from app.catalog import COFFEE
 from app.gateway import Payment, ProviderAmount, amount_value
 from app.main import create_app
-from app.merchants import CLEANING_CSV, price_list
+from app.merchants import CLEANING_CSV, Merchants, price_list
 from app.settings import Settings
 from app.storage import Store
 
@@ -196,6 +197,124 @@ def test_each_merchant_uses_own_sealed_token(settings, monkeypatch):
                 "/merchant/connection", data={"token": token, "mcp_token": duplicate}, headers={"Origin": ORIGIN},
             )
             assert response.status_code == 400 and "другим магазином" in response.text
+
+
+def test_rotate_payment_token_only_after_verifying_store_payment(settings, monkeypatch):
+    settings = replace(settings, mode="live", vault_key=Fernet.generate_key().decode())
+    original = "fixture-original-connector"
+    replacement = "fixture-replacement-connector"
+    payments = {}
+    settled_ids = set()
+    during_verification = None
+
+    class Gateway:
+        def __init__(self, token):
+            self.token = token
+
+        def check(self):
+            return True
+
+        def create(self, amount, attempt_id):
+            assert self.token == original
+            payment = Payment(
+                id=attempt_id, status="pending", amount=ProviderAmount(value=amount_value(amount), currency="RUB"),
+                confirmation_url="https://yookassa.ru/checkout/test", description=f"Order {attempt_id}",
+            )
+            payments[attempt_id] = payment
+            return payment
+
+        def get(self, external_id):
+            payment = payments[external_id]
+            if self.token == "fixture-mismatched-connector":
+                return payment.model_copy(update={"description": "Order another-attempt"})
+            if self.token == "fixture-racing-connector":
+                during_verification()
+            return payment.model_copy(update={"status": "succeeded"}) if external_id in settled_ids else payment
+
+    monkeypatch.setattr("app.main.YooKassa", Gateway)
+    monkeypatch.setattr("app.merchants.YooKassa", Gateway)
+    with TestClient(create_app(settings, agent=DemoAgent()), base_url=ORIGIN) as client:
+        csrf = register(client)
+        assert publish(client, csrf).status_code == 200
+
+        def connect(value):
+            return client.post("/merchant/connection", data={"token": csrf, "mcp_token": value}, headers={"Origin": ORIGIN})
+
+        assert connect(original).status_code == 200
+        assert connect(replacement).status_code == 400
+        headers, order, url = cleaning_order(client)
+        attempt = confirm(client, headers, order, url)
+        assert attempt.json()["status"] == "pending"
+        active = connect(replacement)
+        assert active.status_code == 400 and "активных платежей" in active.text
+        settled_ids.add(attempt.json()["id"])
+        assert client.get(attempt.headers["Location"], headers=headers).json()["status"] == "succeeded"
+        rejected = connect("fixture-mismatched-connector")
+        assert rejected.status_code == 400 and "не подтвердил" in rejected.text
+        merchants = Merchants(Store(settings.db_path, "live"), settings, COFFEE)
+        assert merchants.token("cleaning") == original
+
+        next_headers, next_order, next_url = cleaning_order(client)
+        next_attempt = None
+
+        def reserve_during_verification():
+            nonlocal next_attempt
+            next_attempt = confirm(client, next_headers, next_order, next_url)
+            assert next_attempt.json()["status"] == "pending"
+
+        during_verification = reserve_during_verification
+        with pytest.raises(ValueError, match="активных платежей"):
+            merchants.connect("cleaning", "fixture-racing-connector")
+        assert merchants.token("cleaning") == original
+        assert next_attempt is not None
+        settled_ids.add(next_attempt.json()["id"])
+        assert client.get(next_attempt.headers["Location"], headers=next_headers).json()["status"] == "succeeded"
+
+        assert connect(replacement).status_code == 200
+        assert merchants.token("cleaning") == replacement
+
+
+def test_existing_payments_require_verification_after_removing_environment_token(settings, monkeypatch):
+    class Gateway:
+        def __init__(self, token):
+            self.token = token
+
+        def check(self):
+            return True
+
+        def create(self, amount, attempt_id):
+            return Payment(
+                id=attempt_id, status="pending", amount=ProviderAmount(value=amount_value(amount), currency="RUB"),
+                confirmation_url="https://yookassa.ru/checkout/test", description=f"Order {attempt_id}",
+            )
+
+        def get(self, external_id):
+            assert self.token == original
+            return Payment(
+                id=external_id, status="succeeded", amount=ProviderAmount(value="7250.00", currency="RUB"),
+                description=f"Order {external_id}",
+            )
+
+    monkeypatch.setattr("app.main.YooKassa", Gateway)
+    monkeypatch.setattr("app.merchants.YooKassa", Gateway)
+    original = "fixture-original-env-connector"
+    settings = replace(settings, mode="live", vault_key=Fernet.generate_key().decode(), mcp_token=original)
+    with TestClient(create_app(settings, agent=DemoAgent()), base_url=ORIGIN) as client:
+        register(client, "coffee")
+        headers, order = start(client, "coffee")
+        url = f"{ORDERS}/{order['id']}"
+        response = client.post(url + "/messages", headers=headers, json={
+            "order_version": order["version"], "text": "20 завтраков, из них 5 вегетарианских",
+            "client_message_id": str(uuid4()),
+        })
+        attempt = confirm(client, headers, response.json()["order"], url)
+        assert client.get(attempt.headers["Location"], headers=headers).json()["status"] == "succeeded"
+
+    without_env_token = replace(settings, mcp_token="")
+    merchants = Merchants(Store(settings.db_path, "live"), without_env_token, COFFEE)
+    with pytest.raises(ValueError, match="Не удалось проверить токен"):
+        merchants.connect("coffee", "fixture-unrelated-connector")
+    assert merchants.token("coffee") is None
 
 
 def test_area_bounds_and_csv_validation():

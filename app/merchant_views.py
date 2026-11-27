@@ -21,8 +21,24 @@ def merchant_routes(merchants, templates, payments):
     entry_cookie = prefix + "merchant_entry"
     session_cookie = prefix + "merchant_session"
     age = 8 * 3600
+    private = settings.access == "private"
+
+    def assignment(request):
+        slug = settings.oidc_merchants.get(request.state.corporate_subject)
+        if not slug:
+            raise OrderError(403, "merchant_not_assigned", "Администратор ещё не назначил вам магазин.")
+        return slug, request.state.corporate_token
+
+    def registered(slug):
+        with store.read() as db:
+            return db.execute("SELECT 1 FROM merchants WHERE slug = ?", (slug,)).fetchone() is not None
 
     def manager(request):
+        if private:
+            slug, token = assignment(request)
+            if not registered(slug):
+                raise OrderError(401, "merchant_setup_required", "Сначала создайте назначенную витрину.")
+            return slug, token
         token = request.cookies.get(session_cookie, "")
         if not SESSION_TOKEN.fullmatch(token):
             raise OrderError(401, "merchant_session_required", "Войдите в кабинет продавца.")
@@ -36,6 +52,11 @@ def merchant_routes(merchants, templates, payments):
         return row["merchant"], token
 
     def entrance(request, message="", status=200):
+        if private:
+            slug, token = assignment(request)
+            return templates.TemplateResponse(request, "merchant_login.html", {
+                "private": True, "assigned_slug": slug, "csrf": csrf(token), "error": message,
+            }, status_code=status)
         token = secrets.token_urlsafe(32)
         response = templates.TemplateResponse(request, "merchant_login.html", {
             "csrf": csrf(token), "enable_setup": bool(settings.setup_key), "error": message,
@@ -106,6 +127,10 @@ def merchant_routes(merchants, templates, payments):
         ] if catalog else []
         return templates.TemplateResponse(request, "merchant.html", {
             "slug": slug, "name": owner["name"], "csrf": csrf(token), "error": error, "notice": notice,
+            "private": private, "model_connection": merchants.model_summary(slug),
+            "model_available": merchants.model_connection(slug) is not None,
+            "default_model": settings.llm_model,
+            "model_providers": {key: value[0] for key, value in merchants.model_providers().items()},
             "mode": settings.mode, "connected": bool(merchants.token(slug)), "vault_ready": merchants.vault is not None,
             "catalog_ready": catalog is not None,
             "catalog_version": owner["catalog_version"],
@@ -183,11 +208,15 @@ def merchant_routes(merchants, templates, payments):
 
     @router.get("/login")
     def login_page(request: Request):
+        if private and registered(assignment(request)[0]):
+            return RedirectResponse("/merchant", status_code=303)
         return entrance(request)
 
     @router.post("/login")
     def login(request: Request, token: Annotated[str, Form(max_length=128)], slug: Annotated[str, Form(max_length=32)],
               code: Annotated[str, Form(max_length=128)]):
+        if private:
+            raise OrderError(403, "corporate_sign_in_required", "Для этого кабинета используйте корпоративный вход.")
         begin(request, token)
         slug = slug.strip().lower()
         if not merchants.valid_code(slug, code):
@@ -196,8 +225,18 @@ def merchant_routes(merchants, templates, payments):
 
     @router.post("/register")
     def register(request: Request, token: Annotated[str, Form(max_length=128)], slug: Annotated[str, Form(max_length=32)],
-                 name: Annotated[str, Form(max_length=80)], code: Annotated[str, Form(max_length=128)],
-                 setup: Annotated[str, Form(max_length=256)]):
+                 name: Annotated[str, Form(max_length=80)], code: Annotated[str, Form(max_length=128)] = "",
+                 setup: Annotated[str, Form(max_length=256)] = ""):
+        if private:
+            assigned_slug, identity_token = assignment(request)
+            check_csrf(request, settings.origin, identity_token, token)
+            if slug != assigned_slug:
+                raise OrderError(403, "merchant_not_assigned", "Можно создать только назначенную вам витрину.")
+            try:
+                merchants.register(slug, name.strip(), secrets.token_urlsafe(32), corporate=True)
+            except ValueError as error:
+                return entrance(request, str(error), 400)
+            return RedirectResponse("/merchant", status_code=303)
         begin(request, token)
         if not settings.setup_key or not hmac.compare_digest(setup.encode(), settings.setup_key.encode()):
             return entrance(request, "Проверьте код подключения.", 403)
@@ -212,9 +251,14 @@ def merchant_routes(merchants, templates, payments):
     def home(request: Request, review_page: Annotated[int, Query(ge=1, le=10_000)] = 1):
         try:
             slug, token = manager(request)
-        except OrderError:
+        except OrderError as error:
+            if error.status == 403:
+                raise
             return RedirectResponse("/merchant/login", status_code=303)
-        notices = {"catalog": "Прайс опубликован.", "connection": "Токен сохранён."}
+        notices = {
+            "catalog": "Прайс опубликован.", "connection": "Токен сохранён.",
+            "model": "Модель проверена и сохранена.", "model-off": "Модель отключена.",
+        }
         return dashboard(request, slug, token, notice=notices.get(request.query_params.get("updated"), ""), page=review_page)
 
     @router.get("/example.csv")
@@ -254,10 +298,51 @@ def merchant_routes(merchants, templates, payments):
             return dashboard(request, slug, session, error=str(error), status=400)
         return RedirectResponse("/merchant?updated=connection", status_code=303)
 
+    @router.post("/model")
+    def connect_model(
+        request: Request, token: Annotated[str, Form(max_length=128)],
+        provider: Annotated[str, Form(max_length=32)], model: Annotated[str, Form(max_length=128)],
+        api_key: Annotated[str, Form(max_length=4096)],
+    ):
+        slug, session = manager(request)
+        check_csrf(request, settings.origin, session, token)
+        if settings.mode != "live":
+            raise OrderError(409, "simulated_mode", "Подключение доступно в режиме внешнего API.")
+        try:
+            updated = merchants.connect_model(slug, provider, model.strip(), api_key.strip())
+        except ValueError as error:
+            return dashboard(request, slug, session, error=str(error), status=400)
+        if not updated:
+            return dashboard(request, slug, session, error="Подключение модели уже изменилось. Проверьте текущие настройки.", status=409)
+        return RedirectResponse("/merchant?updated=model", status_code=303)
+
+    @router.post("/model/disconnect")
+    def disconnect_model(request: Request, token: Annotated[str, Form(max_length=128)]):
+        slug, session = manager(request)
+        check_csrf(request, settings.origin, session, token)
+        merchants.disconnect_model(slug)
+        return RedirectResponse("/merchant?updated=model-off", status_code=303)
+
+    @router.post("/model/options")
+    def available_models(
+        request: Request, token: Annotated[str, Form(max_length=128)],
+        provider: Annotated[str, Form(max_length=32)], api_key: Annotated[str, Form(max_length=4096)],
+    ):
+        _, session = manager(request)
+        check_csrf(request, settings.origin, session, token)
+        if settings.mode != "live":
+            raise OrderError(409, "simulated_mode", "Список моделей доступен при внешнем подключении.")
+        try:
+            return {"models": merchants.model_options(provider, api_key.strip())}
+        except ValueError as error:
+            raise OrderError(400, "model_options_unavailable", str(error)) from error
+
     @router.post("/logout")
     def logout(request: Request, token: Annotated[str, Form(max_length=128)]):
         _, session = manager(request)
         check_csrf(request, settings.origin, session, token)
+        if private:
+            return RedirectResponse("/oauth2/sign_out", status_code=303)
         with store.transaction() as db:
             db.execute("DELETE FROM merchant_sessions WHERE id = ?", (digest(session),))
         response = RedirectResponse("/merchant/login", status_code=303)

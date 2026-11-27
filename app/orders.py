@@ -5,6 +5,7 @@ from uuid import uuid4
 import httpx
 from pydantic import ValidationError
 
+from .agent import ModelNotSent
 from .catalog import Catalog
 from .storage import Store
 
@@ -88,10 +89,11 @@ def quote_for(db, row, catalog: Catalog, quantities: dict) -> bool:
 
 
 class Orders:
-    def __init__(self, store: Store, catalog_for, agent):
+    def __init__(self, store: Store, catalog_for, agent, settings):
         self.store = store
         self.catalog_for = catalog_for
         self.agent = agent
+        self.settings = settings
 
     def create(self, session, key: str):
         with self.store.transaction() as db:
@@ -160,11 +162,16 @@ class Orders:
             message_id = previous["id"] if previous else uuid4().hex
             if self.store.mode == "live":
                 db.execute("DELETE FROM model_calls WHERE started_at < ?", (now - 3600,))
-                all_calls, own_calls = db.execute(
-                    "SELECT COUNT(*), COUNT(CASE WHEN session_id = ? THEN 1 END) FROM model_calls",
-                    (session["id"],),
+                all_calls, own_calls, shop_calls = db.execute(
+                    """SELECT COUNT(*), COUNT(CASE WHEN c.session_id = ? THEN 1 END),
+                       COUNT(CASE WHEN s.merchant = ? THEN 1 END)
+                       FROM model_calls c JOIN sessions s ON s.id = c.session_id""",
+                    (session["id"], session["merchant"]),
                 ).fetchone()
-                if all_calls >= 120 or own_calls >= 25:
+                if (
+                    all_calls >= self.settings.model_instance_limit or shop_calls >= self.settings.model_merchant_limit
+                    or own_calls >= self.settings.model_session_limit
+                ):
                     raise OrderError(429, "rate_limited", "Лимит сообщений исчерпан. Попробуйте позже.")
                 db.execute("INSERT INTO model_calls VALUES (?, ?, ?)", (lease, session["id"], now))
             db.execute(
@@ -176,6 +183,7 @@ class Orders:
             quantities = json.loads(row["quantities"])
             seller = db.execute("SELECT reply FROM seller_reviews WHERE order_id = ? AND closed_at IS NULL", (order_id,)).fetchone()
 
+        not_sent = False
         try:
             context = [(r["text"][:300], json.loads(r["result"])["reply"][:250]) for r in reversed(recent)]
             if seller and seller["reply"]:
@@ -230,10 +238,15 @@ class Orders:
                 }
                 db.execute("UPDATE messages SET result = ? WHERE id = ?", (json.dumps(result), message_id))
                 return result
+        except ModelNotSent as error:
+            not_sent = True
+            raise OrderError(503, "agent_unavailable", str(error)) from error
         except (httpx.HTTPError, ValidationError, KeyError, IndexError, ValueError, TypeError) as error:
             raise OrderError(503, "agent_unavailable", "Ответ пока недоступен. Повторите сообщение.") from error
         finally:
             with self.store.transaction() as db:
+                if not_sent:
+                    db.execute("DELETE FROM model_calls WHERE call_id = ?", (lease,))
                 db.execute("DELETE FROM messages WHERE id = ? AND lease = ? AND result IS NULL", (message_id, lease))
 
     @staticmethod

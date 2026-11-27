@@ -1,6 +1,7 @@
 import sqlite3
 from contextlib import closing, contextmanager
 from pathlib import Path
+from threading import Lock
 
 
 SCHEMA = """
@@ -12,6 +13,10 @@ CREATE TABLE IF NOT EXISTS merchants (
 );
 CREATE TABLE IF NOT EXISTS merchant_sessions (
     id TEXT PRIMARY KEY, merchant TEXT NOT NULL REFERENCES merchants(slug), expires_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS model_connectors (
+    merchant TEXT PRIMARY KEY REFERENCES merchants(slug),
+    provider TEXT NOT NULL, model TEXT NOT NULL, ciphertext TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS auth_attempts (
     address TEXT NOT NULL, attempted_at INTEGER NOT NULL
@@ -63,10 +68,15 @@ CREATE TABLE IF NOT EXISTS demo_payments (
 """
 
 
+class StoreBusy(Exception):
+    pass
+
+
 class Store:
     def __init__(self, path: str, mode: str):
         self.path = path
         self.mode = mode
+        self.writer = Lock()
 
     def connect(self):
         connection = sqlite3.connect(self.path, timeout=5)
@@ -112,6 +122,15 @@ class Store:
 
     @contextmanager
     def transaction(self):
-        with closing(self.connect()) as db, db:
-            db.execute("BEGIN IMMEDIATE")
-            yield db
+        if not self.writer.acquire(timeout=3):
+            raise StoreBusy()
+        try:
+            with closing(self.connect()) as db, db:
+                db.execute("BEGIN IMMEDIATE")
+                yield db
+        except sqlite3.OperationalError as error:
+            if getattr(error, "sqlite_errorcode", 0) & 0xFF in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise StoreBusy() from error
+            raise
+        finally:
+            self.writer.release()
